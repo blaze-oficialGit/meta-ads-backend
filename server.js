@@ -516,25 +516,75 @@ app.post('/api/campaigns/create', async (req, res) => {
 
         console.log(`✅ Campanha criada: ${campaignData.id}`);
 
-        // 2. Criar Ad Set
+        // 2. Criar Ad Set — parâmetros variam conforme o objetivo OUTCOME_*
+        // Nível de conversão específico escolhido pelo usuário (custom_event_type)
+        // Padrões por objetivo caso o usuário não especifique
+        const defaultEventByObjective = {
+          OUTCOME_SALES: 'PURCHASE',
+          OUTCOME_LEADS: 'LEAD',
+          OUTCOME_TRAFFIC: null,
+          OUTCOME_ENGAGEMENT: null,
+          OUTCOME_AWARENESS: null,
+          OUTCOME_APP_PROMOTION: null
+        };
+        // Evento final: usa o escolhido pelo usuário ou o padrão do objetivo
+        const conversionEvent = config.conversion_event || defaultEventByObjective[config.objective] || 'PURCHASE';
+        console.log(`🎯 Evento de conversão: ${conversionEvent} (objetivo: ${config.objective})`);
+
+        // Mapeamento oficial Meta API v21.0 para objetivos OUTCOME_*
+        const objectiveConfig = {
+          OUTCOME_SALES: {
+            optimization_goal: 'OFFSITE_CONVERSIONS',
+            billing_event: 'IMPRESSIONS',
+            promoted_object: { pixel_id: sel.pixelId, custom_event_type: conversionEvent }
+          },
+          OUTCOME_LEADS: {
+            optimization_goal: 'LEAD_GENERATION',
+            billing_event: 'IMPRESSIONS',
+            promoted_object: { pixel_id: sel.pixelId, custom_event_type: conversionEvent }
+          },
+          OUTCOME_TRAFFIC: {
+            optimization_goal: 'LINK_CLICKS',
+            billing_event: 'LINK_CLICKS',
+            promoted_object: null
+          },
+          OUTCOME_ENGAGEMENT: {
+            optimization_goal: 'POST_ENGAGEMENT',
+            billing_event: 'IMPRESSIONS',
+            promoted_object: { page_id: sel.pageId }
+          },
+          OUTCOME_AWARENESS: {
+            optimization_goal: 'REACH',
+            billing_event: 'IMPRESSIONS',
+            promoted_object: null
+          },
+          OUTCOME_APP_PROMOTION: {
+            optimization_goal: 'APP_INSTALLS',
+            billing_event: 'IMPRESSIONS',
+            promoted_object: null
+          }
+        };
+        const objCfg = objectiveConfig[config.objective] || objectiveConfig.OUTCOME_SALES;
+
         const adSetBody = {
           name: `AdSet ${i} - Auto`,
           campaign_id: campaignData.id,
           status: 'PAUSED',
-          optimization_goal: 'OFFSITE_CONVERSIONS',
-          billing_event: 'IMPRESSIONS',
+          optimization_goal: objCfg.optimization_goal,
+          billing_event: objCfg.billing_event,
           daily_budget: config.budget_type === 'ABO' && config.daily_budget ? Math.round(config.daily_budget * 100) : undefined,
           targeting: {
             age_min: config.age_min || 25,
             age_max: config.age_max || 45,
             genders: config.gender === 'male' ? 1 : config.gender === 'female' ? 2 : 0,
             locales: [6] // Português Brasil
-          },
-          promoted_object: {
-            pixel_id: sel.pixelId,
-            custom_event_type: 'PURCHASE'
           }
         };
+        // Só adiciona promoted_object se existir para este objetivo
+        if (objCfg.promoted_object) {
+          adSetBody.promoted_object = objCfg.promoted_object;
+        }
+        console.log(`📋 AdSet config: goal=${objCfg.optimization_goal}, billing=${objCfg.billing_event}, objective=${config.objective}`);
 
         const adSetData = await graphPost(`act_${cleanId}/adsets`, accessToken, adSetBody);
 
