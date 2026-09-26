@@ -467,17 +467,20 @@ app.post('/api/campaigns/create', async (req, res) => {
         if (config.budget_type === 'ABO' && config.daily_budget) {
           adSetBody.daily_budget = Math.round(config.daily_budget * 100);
         }
-        // bid_strategy: LOWEST_COST_WITH_BID_CAP e TARGET_COST exigem bid_amount
-        // Se não houver bid_amount, fallback para LOWEST_COST_WITHOUT_CAP (sem limite)
-        if (config.budget_type === 'ABO' && config.bid_strategy) {
+        // bid_strategy: estratégias com cap EXIGEM bid_amount > 0
+        // Se bid_amount for 0 ou ausente, NUNCA envia essas estratégias (usa padrão da Meta)
+        // Isso vale tanto para ABO quanto CBO — a regra é universal
+        if (config.bid_strategy) {
           const needsBidAmount = ['LOWEST_COST_WITH_BID_CAP', 'BID_CAP', 'TARGET_COST', 'COST_CAP'].includes(config.bid_strategy);
-          if (needsBidAmount && config.bid_amount) {
+          if (needsBidAmount && config.bid_amount > 0) {
             adSetBody.bid_strategy = config.bid_strategy;
             adSetBody.bid_amount = Math.round(config.bid_amount * 100);
           } else if (!needsBidAmount) {
+            // LOWEST_COST_WITHOUT_CAP não precisa de bid_amount
             adSetBody.bid_strategy = config.bid_strategy;
           }
-          // Se precisa de bid_amount mas não tem, NÃO envia bid_strategy (usa padrão da Meta)
+          // Se precisa de bid_amount mas é 0/ausente → NÃO envia bid_strategy
+          // A Meta usa LOWEST_COST_WITHOUT_CAP automaticamente
         }
         if (config.adset_spend_cap) {
           adSetBody.spend_cap = Math.round(config.adset_spend_cap * 100);
