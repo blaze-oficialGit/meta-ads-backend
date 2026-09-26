@@ -437,6 +437,7 @@ app.post('/api/campaigns/create', async (req, res) => {
           name: adsetName,
           campaign_id: campaignData.id,
           status: 'PAUSED',
+          destination_type: 'WEBSITE', // OBRIGATÓRIO para OUTCOME_SALES na API v21.0
           optimization_goal: 'OFFSITE_CONVERSIONS',
           billing_event: 'IMPRESSIONS', // OBRIGATÓRIO para Advantage+ Sales
           promoted_object: {
