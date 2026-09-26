@@ -53,27 +53,23 @@ async function graphGet(path, accessToken, params = {}) {
   const url = new URL(`https://graph.facebook.com/${process.env.META_API_VERSION}/${path}`);
   url.searchParams.set('access_token', accessToken);
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
-  console.log(`📡 Graph API: ${path}`);
+  console.log(`📡 Graph GET: ${path}`);
   const res = await fetch(url.toString());
   const data = await res.json();
-  if (data.error) {
-    console.error(`❌ Graph API error [${path}]:`, data.error);
-  }
+  if (data.error) console.error(`❌ Graph GET error [${path}]:`, data.error);
   return data;
 }
 
 async function graphPost(path, accessToken, body) {
   const url = `https://graph.facebook.com/${process.env.META_API_VERSION}/${path}`;
-  console.log(`📤 Graph POST: ${path}`);
+  console.log(`📤 Graph POST: ${path}`, JSON.stringify(body).slice(0, 300));
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ...body, access_token: accessToken })
   });
   const data = await res.json();
-  if (data.error) {
-    console.error(`❌ Graph POST error [${path}]:`, data.error);
-  }
+  if (data.error) console.error(`❌ Graph POST error [${path}]:`, data.error);
   return data;
 }
 
@@ -93,43 +89,27 @@ app.get('/api/auth/login', (req, res) => {
   });
 
   console.log(`🔐 Iniciando login OAuth, state=${state.slice(0,8)}...`);
-
-  // Salva state em cookie para sobreviver a reinícios do Railway
-  res.cookie('oauth_state', state, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'lax',
-    maxAge: 600000 // 10 minutos
-  });
-
+  res.cookie('oauth_state', state, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 600000 });
   res.redirect(`https://www.facebook.com/${process.env.META_API_VERSION}/dialog/oauth?${params}`);
 });
 
 app.get('/api/auth/callback', async (req, res) => {
   const { code, state, error } = req.query;
   const cookieState = req.cookies?.oauth_state;
-
-  console.log(`📥 Callback recebido: code=${!!code}, state=${!!state}, cookieState=${!!cookieState}, error=${error || 'none'}`);
+  console.log(`📥 Callback: code=${!!code}, state=${!!state}, cookie=${!!cookieState}, error=${error || 'none'}`);
 
   if (error) {
     res.clearCookie('oauth_state');
     return res.redirect(`${process.env.FRONTEND_URL}?error=${error}`);
   }
 
-  // Valida state: aceita se estiver na memória OU no cookie (sobrevive a reinícios)
   const stateValid = (state && oauthStates[state]) || (state && cookieState && state === cookieState);
-
   if (!code || !state || !stateValid) {
-    console.error('❌ State inválido ou ausente', {
-      hasState: !!state,
-      inMemory: !!(state && oauthStates[state]),
-      inCookie: !!(state && cookieState && state === cookieState)
-    });
+    console.error('❌ State inválido', { hasState: !!state, inMemory: !!(state && oauthStates[state]), inCookie: !!(state && cookieState && state === cookieState) });
     res.clearCookie('oauth_state');
-    return res.redirect(`${process.env.FRONTEND_URL}?error=invalid_oauth&msg=${encodeURIComponent('State OAuth expirou ou é inválido. Tente novamente.')}`);
+    return res.redirect(`${process.env.FRONTEND_URL}?error=invalid_oauth`);
   }
 
-  // Limpa state da memória e cookie
   if (oauthStates[state]) delete oauthStates[state];
   res.clearCookie('oauth_state');
 
@@ -146,7 +126,6 @@ app.get('/api/auth/callback', async (req, res) => {
     );
     const tokenData = await tokenRes.json();
     if (tokenData.error) throw new Error(tokenData.error.message);
-    console.log('✅ Token de curta duração obtido');
 
     console.log('🔄 Trocando por token de longa duração...');
     const longLivedRes = await fetch(
@@ -160,7 +139,6 @@ app.get('/api/auth/callback', async (req, res) => {
     );
     const longLivedData = await longLivedRes.json();
     const metaAccessToken = longLivedData.access_token || tokenData.access_token;
-    console.log('✅ Token de longa duração obtido');
 
     console.log('🏢 Buscando Business Managers...');
     const businessesData = await graphGet('me/businesses', metaAccessToken, {
@@ -173,50 +151,34 @@ app.get('/api/auth/callback', async (req, res) => {
       adAccounts: (bm.owned_ad_accounts?.data || []).map(acc => {
         const st = accountStatusLabel(acc.account_status);
         return {
-          id: acc.id,
-          name: acc.name,
-          currency: acc.currency,
-          status: acc.account_status,
-          statusLabel: st.label,
-          statusColor: st.color,
-          isActive: acc.account_status === 1,
-          selected: false,
-          pixelId: null,
-          pageId: null,
-          advertiserId: null
+          id: acc.id, name: acc.name, currency: acc.currency,
+          status: acc.account_status, statusLabel: st.label, statusColor: st.color,
+          isActive: acc.account_status === 1, selected: false
         };
       })
     }));
-    console.log(`✅ ${businesses.length} BM(s) encontrado(s)`);
 
     if (businesses.length === 0) {
       console.log('👤 Sem BMs, buscando contas pessoais...');
-      const directData = await graphGet('me/adaccounts', metaAccessToken, {
-        fields: 'name,account_status,currency'
-      });
+      const directData = await graphGet('me/adaccounts', metaAccessToken, { fields: 'name,account_status,currency' });
       if (directData.data?.length > 0) {
         businesses.push({
-          id: 'personal',
-          name: 'Contas Pessoais',
+          id: 'personal', name: 'Contas Pessoais',
           adAccounts: directData.data.map(acc => {
             const st = accountStatusLabel(acc.account_status);
-            return {
-              id: acc.id, name: acc.name, currency: acc.currency,
-              status: acc.account_status, statusLabel: st.label, statusColor: st.color,
-              isActive: acc.account_status === 1, selected: false,
-              pixelId: null, pageId: null, advertiserId: null
-            };
+            return { id: acc.id, name: acc.name, currency: acc.currency, status: acc.account_status, statusLabel: st.label, statusColor: st.color, isActive: acc.account_status === 1, selected: false };
           })
         });
-        console.log(`✅ ${directData.data.length} conta(s) pessoal(is) encontrada(s)`);
       }
     }
 
-    const sessionToken = crypto.randomBytes(32).toString('hex');
-    sessions[sessionToken] = { accessToken: metaAccessToken, businesses };
-    console.log(`✅ Login OK — sessionToken=${sessionToken.slice(0,8)}..., ${businesses.length} BM(s)`);
-    res.redirect(`${process.env.FRONTEND_URL}?auth=success&token=${sessionToken}`);
+    // Configurações globais (pixel/página/anunciante aplicados em todas as contas)
+    const globalConfig = { pixelId: null, pageId: null, advertiserId: null, instagramId: null };
 
+    const sessionToken = crypto.randomBytes(32).toString('hex');
+    sessions[sessionToken] = { accessToken: metaAccessToken, businesses, globalConfig };
+    console.log(`✅ Login OK — ${businesses.length} BM(s)`);
+    res.redirect(`${process.env.FRONTEND_URL}?auth=success&token=${sessionToken}`);
   } catch (err) {
     console.error('❌ OAuth error:', err);
     res.redirect(`${process.env.FRONTEND_URL}?error=oauth_failed&msg=${encodeURIComponent(err.message)}`);
@@ -225,21 +187,13 @@ app.get('/api/auth/callback', async (req, res) => {
 
 app.get('/api/auth/status', (req, res) => {
   const session = getSession(req);
-  if (!session) {
-    console.log('📊 Status: desconectado');
-    return res.json({ connected: false, businesses: [] });
-  }
-  const totalAccounts = session.data.businesses.reduce((sum, bm) => sum + bm.adAccounts.length, 0);
-  console.log(`📊 Status: conectado, ${session.data.businesses.length} BM(s), ${totalAccounts} conta(s)`);
-  res.json({ connected: true, businesses: session.data.businesses });
+  if (!session) return res.json({ connected: false, businesses: [], globalConfig: null });
+  res.json({ connected: true, businesses: session.data.businesses, globalConfig: session.data.globalConfig });
 });
 
 app.post('/api/auth/logout', (req, res) => {
   const session = getSession(req);
-  if (session) {
-    delete sessions[session.token];
-    console.log(`🚪 Logout: ${session.token.slice(0,8)}...`);
-  }
+  if (session) delete sessions[session.token];
   res.json({ ok: true });
 });
 
@@ -250,21 +204,10 @@ app.get('/api/accounts/:accountId/pixels', async (req, res) => {
   try {
     let accId = req.params.accountId;
     if (!accId.startsWith('act_')) accId = `act_${accId}`;
-
-    console.log(`🔍 Buscando pixels para ${accId}`);
-    const data = await graphGet(`${accId}/adspixels`, session.data.accessToken, {
-      fields: 'id,name,owner_business'
-    });
-
-    if (data.error) {
-      return res.status(400).json({ error: data.error.message });
-    }
-
-    const pixels = data.data || [];
-    console.log(`✅ ${pixels.length} pixel(s) encontrado(s) para ${accId}`);
-    res.json({ pixels });
+    const data = await graphGet(`${accId}/adspixels`, session.data.accessToken, { fields: 'id,name' });
+    if (data.error) return res.status(400).json({ error: data.error.message });
+    res.json({ pixels: data.data || [] });
   } catch (err) {
-    console.error('❌ Erro pixels:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -274,64 +217,68 @@ app.get('/api/pages', async (req, res) => {
   const session = getSession(req);
   if (!session) return res.status(401).json({ error: 'Not authenticated' });
   try {
-    console.log('📄 Buscando páginas do usuário...');
-    const data = await graphGet('me/accounts', session.data.accessToken, {
-      fields: 'id,name,category,picture'
-    });
+    const data = await graphGet('me/accounts', session.data.accessToken, { fields: 'id,name,category' });
     if (data.error) return res.status(400).json({ error: data.error.message });
-
-    const pages = data.data || [];
-    console.log(`✅ ${pages.length} página(s) encontrada(s)`);
-    res.json({ pages });
+    res.json({ pages: data.data || [] });
   } catch (err) {
-    console.error('❌ Erro páginas:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// --- ROTA: SALVAR SELEÇÕES (pixel/página/anunciante por conta) ---
-app.post('/api/accounts/update-selection', (req, res) => {
+// --- ROTA: ANUNCIANTES REAIS DO BM (pessoas verificadas / entidades de transparência) ---
+app.get('/api/businesses/:businessId/advertisers', async (req, res) => {
   const session = getSession(req);
   if (!session) return res.status(401).json({ error: 'Not authenticated' });
-  const { accountId, pixelId, pageId, advertiserId } = req.body;
-  for (const bm of session.data.businesses) {
-    const acc = bm.adAccounts.find(a => a.id === accountId);
-    if (acc) {
-      if (pixelId !== undefined) acc.pixelId = pixelId || null;
-      if (pageId !== undefined) acc.pageId = pageId || null;
-      if (advertiserId !== undefined) acc.advertiserId = advertiserId || null;
-      console.log(`💾 Seleção atualizada para ${accountId}: pixel=${acc.pixelId}, page=${acc.pageId}, adv=${acc.advertiserId}`);
-      break;
+  try {
+    // Tenta buscar assigned_users (pessoas com acesso ao BM)
+    const data = await graphGet(`${req.params.businessId}/assigned_users`, session.data.accessToken, {
+      fields: 'id,name,email,role'
+    });
+    if (data.error) {
+      // Fallback: retorna lista vazia se não tiver permissão
+      console.warn('⚠️ Sem permissão para assigned_users, retornando vazio');
+      return res.json({ advertisers: [] });
     }
+    res.json({ advertisers: data.data || [] });
+  } catch (err) {
+    res.json({ advertisers: [] });
   }
-  res.json({ ok: true });
 });
 
-// --- ROTA: VALIDAR CONFIGURAÇÕES OBRIGATÓRIAS ---
-app.post('/api/accounts/validate-required', (req, res) => {
+// --- ROTA: PERFIS DO INSTAGRAM VINCULADOS ÀS PÁGINAS ---
+app.get('/api/pages/:pageId/instagram', async (req, res) => {
   const session = getSession(req);
   if (!session) return res.status(401).json({ error: 'Not authenticated' });
-  const { accountIds } = req.body;
-  if (!accountIds?.length) return res.status(400).json({ error: 'No accounts provided' });
-
-  const missing = [];
-  for (const bm of session.data.businesses) {
-    for (const acc of bm.adAccounts) {
-      if (!accountIds.includes(acc.id)) continue;
-      const gaps = [];
-      if (!acc.pixelId) gaps.push('Pixel');
-      if (!acc.pageId) gaps.push('Página');
-      if (!acc.advertiserId) gaps.push('Anunciante');
-      if (gaps.length > 0) {
-        missing.push({ accountId: acc.id, accountName: acc.name, missing: gaps });
-      }
+  try {
+    const data = await graphGet(`${req.params.pageId}`, session.data.accessToken, {
+      fields: 'instagram_business_account{id,username,name}'
+    });
+    if (data.error || !data.instagram_business_account) {
+      return res.json({ instagram: null });
     }
+    res.json({ instagram: data.instagram_business_account });
+  } catch (err) {
+    res.json({ instagram: null });
   }
+});
 
-  if (missing.length > 0) {
-    return res.json({ valid: false, missing });
-  }
-  res.json({ valid: true });
+// --- ROTA: CONFIGURAÇÕES GLOBAIS (aplica em todas as contas de uma vez) ---
+app.post('/api/global-config', (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Not authenticated' });
+  const { pixelId, pageId, advertiserId, instagramId } = req.body;
+  if (pixelId !== undefined) session.data.globalConfig.pixelId = pixelId || null;
+  if (pageId !== undefined) session.data.globalConfig.pageId = pageId || null;
+  if (advertiserId !== undefined) session.data.globalConfig.advertiserId = advertiserId || null;
+  if (instagramId !== undefined) session.data.globalConfig.instagramId = instagramId || null;
+  console.log(`💾 Config global atualizada:`, session.data.globalConfig);
+  res.json({ ok: true, globalConfig: session.data.globalConfig });
+});
+
+app.get('/api/global-config', (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Not authenticated' });
+  res.json({ globalConfig: session.data.globalConfig });
 });
 
 // --- ROTA DE INTERPRETAÇÃO IA ---
@@ -339,37 +286,24 @@ app.post('/api/ai/interpret', async (req, res) => {
   const { command, creatives, disableAdvantagePlus } = req.body;
   if (!command) return res.status(400).json({ error: 'Command required' });
 
-  const creativeList = (creatives || [])
-    .map((c, i) => `${i + 1}. "${c.name || c.fileName}" (${c.type})`)
-    .join('\n');
+  const creativeList = (creatives || []).map((c, i) => `${i + 1}. "${c.name || c.fileName}" (${c.type})`).join('\n');
 
   try {
     const { default: OpenAI } = await import('openai');
-
     if (!process.env.OPENAI_API_KEY) {
-      console.log('🤖 IA: usando fallback (sem OPENAI_API_KEY)');
       return res.json({
-        campaigns: 5,
-        objective: 'OUTCOME_SALES',
-        budget_type: 'CBO',
-        daily_budget: 100,
-        gender: 'all',
-        age_min: 25,
-        age_max: 45,
-        start_time: 'immediate',
-        disable_advantage_plus: !!disableAdvantagePlus,
-        website_url: '',
-        display_link: '',
-        url_params: '',
-        primary_text: '',
-        headline: '',
-        description: '',
-        call_to_action: 'LEARN_MORE',
+        campaigns: 1, objective: 'OUTCOME_SALES', budget_type: 'CBO', daily_budget: 25,
+        gender: 'all', age_min: 18, age_max: 65, conversion_event: 'PURCHASE',
+        website_url: '', display_link: '', url_params: '',
+        primary_text: '', headline: '', description: '', call_to_action: 'LEARN_MORE',
+        campaign_name: '', adset_name: '', ad_name: '',
+        placements: 'AUTOMATIC', bid_strategy: 'LOWEST_COST_WITHOUT_CAP',
+        start_time: 'immediate', end_time: '',
+        languages: [], dynamic_creative: false,
         creative_assignments: {}
       });
     }
 
-    console.log('🤖 IA: interpretando comando...');
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const systemPrompt = `You are a Meta Ads campaign parser. Extract JSON from Portuguese commands.
 Return ONLY JSON with these fields:
@@ -380,34 +314,26 @@ Return ONLY JSON with these fields:
 - gender (male/female/all)
 - age_min (number)
 - age_max (number)
-- start_time (HH:MM or "immediate")
-- disable_advantage_plus (boolean): true se o usuário pediu para desativar recomendações/IA da Meta
-- website_url (string): URL do site de destino
-- display_link (string): link de exibição (opcional, aparece no anúncio)
-- url_params (string): parâmetros UTM tipo utm_source=facebook&utm_medium=cpc
-- primary_text (string): texto principal do anúncio
-- headline (string): título do anúncio
-- description (string): descrição do anúncio
-- call_to_action (string): CTA button - LEARN_MORE/SHOP_NOW/SIGN_UP/CONTACT_US/DOWNLOAD/BOOK_NOW/GET_QUOTE/APPLY_NOW/SEND_MESSAGE/PLAY_GAME/LISTEN_MUSIC/WATCH_VIDEO/USE_APP/CALL_NOW/MESSAGE_PAGE/DONATE/SUBSCRIBE/SAY_THANKS/NO_BUTTON
-- creative_assignments (object): maps each campaign number (as string "1","2"...) to the NAME of the creative to use.
+- conversion_event (PURCHASE/ADD_TO_CART/INITIATE_CHECKOUT/LEAD/COMPLETE_REGISTRATION/VIEW_CONTENT/SEARCH/CONTACT/SUBSCRIBE)
+- website_url, display_link, url_params (strings)
+- primary_text, headline, description (strings)
+- call_to_action (LEARN_MORE/SHOP_NOW/SIGN_UP/CONTACT_US/DOWNLOAD/BOOK_NOW/GET_QUOTE/APPLY_NOW/SEND_MESSAGE/WATCH_VIDEO/CALL_NOW/SUBSCRIBE/DONATE/NO_BUTTON)
+- campaign_name, adset_name, ad_name (strings, optional custom names)
+- placements (AUTOMATIC or MANUAL)
+- bid_strategy (LOWEST_COST_WITHOUT_CAP/COST_CAP/BID_CAP)
+- dynamic_creative (boolean)
+- creative_assignments (object mapping campaign number to creative name)
 
-AVAILABLE CREATIVES (use exact names in creative_assignments):
-${creativeList || '(none uploaded)'}
-
-If user mentions a creative by name/keyword, match it to the closest available creative name. If not specified, assign all creatives round-robin across campaigns.`;
+AVAILABLE CREATIVES:
+${creativeList || '(none)'}`;
 
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: command }
-      ],
+      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: command }],
       response_format: { type: 'json_object' },
       temperature: 0.1
     });
-
     const result = JSON.parse(completion.choices[0].message.content);
-    console.log('✅ IA: interpretação concluída', result);
     res.json(result);
   } catch (err) {
     console.error('❌ AI error:', err);
@@ -415,156 +341,158 @@ If user mentions a creative by name/keyword, match it to the closest available c
   }
 });
 
-// Mapeia qualquer objetivo (legado ou novo) para OUTCOME_* — sua conta/app exige os novos
-// A API rejeita WEBSITE_CONVERSIONS, CONVERSIONS, SALES, etc. e só aceita OUTCOME_*
+// Normaliza objetivo para OUTCOME_* (sua conta exige)
 function normalizeObjective(obj) {
   const map = {
-    // Novos → passam direto
-    OUTCOME_AWARENESS: 'OUTCOME_AWARENESS',
-    OUTCOME_TRAFFIC: 'OUTCOME_TRAFFIC',
-    OUTCOME_ENGAGEMENT: 'OUTCOME_ENGAGEMENT',
-    OUTCOME_LEADS: 'OUTCOME_LEADS',
-    OUTCOME_SALES: 'OUTCOME_SALES',
-    OUTCOME_APP_PROMOTION: 'OUTCOME_APP_PROMOTION',
-    // Legados → converte para OUTCOME_* equivalente
-    SALES: 'OUTCOME_SALES',
-    CONVERSIONS: 'OUTCOME_SALES',
-    WEBSITE_CONVERSIONS: 'OUTCOME_SALES',
-    OFFSITE_CONVERSIONS: 'OUTCOME_SALES',
-    PRODUCT_CATALOG_SALES: 'OUTCOME_SALES',
-    STORE_VISITS: 'OUTCOME_SALES',
-    TRAFFIC: 'OUTCOME_TRAFFIC',
-    LINK_CLICKS: 'OUTCOME_TRAFFIC',
-    ENGAGEMENT: 'OUTCOME_ENGAGEMENT',
-    POST_ENGAGEMENT: 'OUTCOME_ENGAGEMENT',
-    PAGE_LIKES: 'OUTCOME_ENGAGEMENT',
-    EVENT_RESPONSES: 'OUTCOME_ENGAGEMENT',
-    OFFER_CLAIMS: 'OUTCOME_ENGAGEMENT',
-    LEADS: 'OUTCOME_LEADS',
-    LEAD_GENERATION: 'OUTCOME_LEADS',
-    AWARENESS: 'OUTCOME_AWARENESS',
-    BRAND_AWARENESS: 'OUTCOME_AWARENESS',
-    REACH: 'OUTCOME_AWARENESS',
-    VIDEO_VIEWS: 'OUTCOME_AWARENESS',
-    APP_PROMOTION: 'OUTCOME_APP_PROMOTION',
-    APP_INSTALLS: 'OUTCOME_APP_PROMOTION',
-    MESSAGES: 'OUTCOME_ENGAGEMENT',
+    OUTCOME_AWARENESS: 'OUTCOME_AWARENESS', OUTCOME_TRAFFIC: 'OUTCOME_TRAFFIC',
+    OUTCOME_ENGAGEMENT: 'OUTCOME_ENGAGEMENT', OUTCOME_LEADS: 'OUTCOME_LEADS',
+    OUTCOME_SALES: 'OUTCOME_SALES', OUTCOME_APP_PROMOTION: 'OUTCOME_APP_PROMOTION',
+    SALES: 'OUTCOME_SALES', CONVERSIONS: 'OUTCOME_SALES', WEBSITE_CONVERSIONS: 'OUTCOME_SALES',
+    OFFSITE_CONVERSIONS: 'OUTCOME_SALES', PRODUCT_CATALOG_SALES: 'OUTCOME_SALES', STORE_VISITS: 'OUTCOME_SALES',
+    TRAFFIC: 'OUTCOME_TRAFFIC', LINK_CLICKS: 'OUTCOME_TRAFFIC',
+    ENGAGEMENT: 'OUTCOME_ENGAGEMENT', POST_ENGAGEMENT: 'OUTCOME_ENGAGEMENT', PAGE_LIKES: 'OUTCOME_ENGAGEMENT',
+    EVENT_RESPONSES: 'OUTCOME_ENGAGEMENT', OFFER_CLAIMS: 'OUTCOME_ENGAGEMENT', MESSAGES: 'OUTCOME_ENGAGEMENT',
+    LEADS: 'OUTCOME_LEADS', LEAD_GENERATION: 'OUTCOME_LEADS',
+    AWARENESS: 'OUTCOME_AWARENESS', BRAND_AWARENESS: 'OUTCOME_AWARENESS', REACH: 'OUTCOME_AWARENESS', VIDEO_VIEWS: 'OUTCOME_AWARENESS',
+    APP_PROMOTION: 'OUTCOME_APP_PROMOTION', APP_INSTALLS: 'OUTCOME_APP_PROMOTION',
     LOCAL_AWARENESS: 'OUTCOME_AWARENESS'
   };
   return map[obj] || 'OUTCOME_SALES';
 }
 
-// --- ROTA DE CRIAÇÃO DE CAMPANHAS COMPLETAS (Campaign + AdSet + Ad) ---
+// --- ROTA DE CRIAÇÃO DE CAMPANHAS COMPLETAS ---
+// Estrutura correta API v21.0 para OUTCOME_*:
+// - Campaign: objective + daily_budget (CBO) + buying_type=AUCTION (se manual)
+// - AdSet: SEM optimization_goal/billing_event/promoted_object no corpo inicial
+//   → depois criar com promoted_object via endpoint separado OU usar estrutura mínima
+// - Na prática, para OUTCOME_SALES a Meta aceita AdSet com:
+//   targeting + promoted_object (pixel_id + custom_event_type) + SEM optimization_goal explícito
 app.post('/api/campaigns/create', async (req, res) => {
-  const { config, accountIds, accountSelections } = req.body;
+  const { config, accountIds, globalConfig } = req.body;
   const session = getSession(req);
-
   if (!session) return res.status(401).json({ error: 'Not authenticated' });
   const accessToken = session.data.accessToken;
   if (!accountIds?.length) return res.status(400).json({ error: 'No accounts selected' });
 
-  // Normaliza objetivo para valor legado aceito universalmente
-  const rawObjective = config.objective || 'SALES';
-  config.objective = normalizeObjective(rawObjective);
-  console.log(`🎯 Objetivo normalizado: ${rawObjective} → ${config.objective}`);
+  // Usa config global se não vier por conta
+  const pixelId = globalConfig?.pixelId || session.data.globalConfig?.pixelId;
+  const pageId = globalConfig?.pageId || session.data.globalConfig?.pageId;
+  const advertiserId = globalConfig?.advertiserId || session.data.globalConfig?.advertiserId;
+  const instagramId = globalConfig?.instagramId || session.data.globalConfig?.instagramId;
 
-  // Validação obrigatória
-  const validationErrors = [];
-  for (const sel of (accountSelections || [])) {
-    if (!sel.pixelId) validationErrors.push(`Conta ${sel.accountId}: Pixel obrigatório`);
-    if (!sel.pageId) validationErrors.push(`Conta ${sel.accountId}: Página obrigatória`);
-    if (!sel.advertiserId) validationErrors.push(`Conta ${sel.accountId}: Anunciante obrigatório`);
+  if (!pixelId || !pageId) {
+    return res.status(400).json({ error: 'Configuração global incompleta: Pixel e Página são obrigatórios' });
   }
-  if (validationErrors.length > 0) {
-    console.error('❌ Validação falhou:', validationErrors);
-    return res.status(400).json({ error: 'Configuração incompleta', details: validationErrors });
-  }
+
+  const rawObjective = config.objective || 'OUTCOME_SALES';
+  config.objective = normalizeObjective(rawObjective);
+  console.log(`🎯 Objetivo: ${rawObjective} → ${config.objective}`);
+
+  const conversionEvent = config.conversion_event || 'PURCHASE';
+  console.log(`🎯 Evento conversão: ${conversionEvent}`);
 
   const results = [];
-  const apiVersion = process.env.META_API_VERSION;
 
   for (const accountId of accountIds) {
-    const sel = (accountSelections || []).find(s => s.accountId === accountId) || {};
+    const cleanId = accountId.replace('act_', '');
 
     for (let i = 1; i <= (config.campaigns || 1); i++) {
       try {
-        console.log(`🚀 Criando campanha ${i}/${config.campaigns} para ${accountId}...`);
+        console.log(`🚀 [${accountId}] Campanha ${i}/${config.campaigns}...`);
 
-        // Nível de conversão específico escolhido pelo usuário (custom_event_type)
-        const defaultEventByObjective = {
-          OUTCOME_SALES: 'PURCHASE',
-          OUTCOME_LEADS: 'LEAD',
-          OUTCOME_TRAFFIC: null,
-          OUTCOME_ENGAGEMENT: null,
-          OUTCOME_AWARENESS: null,
-          OUTCOME_APP_PROMOTION: null
-        };
-        const conversionEvent = config.conversion_event || defaultEventByObjective[config.objective] || 'PURCHASE';
-        console.log(`🎯 Evento de conversão: ${conversionEvent} (objetivo: ${config.objective})`);
+        // Nomes personalizados ou padrão
+        const campaignName = config.campaign_name || `${config.objective} Campaign ${i} - Auto`;
+        const adsetName = config.adset_name || `AdSet ${i} - Auto`;
+        const adName = config.ad_name || `Ad ${i} - Auto`;
 
-        // 1. Criar Campaign — para OUTCOME_* na v21.0, promoted_object vai AQUI (não no adset)
+        // ===== 1. CAMPANHA =====
+        // Estrutura correta API v21.0 para OUTCOME_SALES com Advantage+:
+        // - SEM buying_type explícito (Meta usa o padrão do Advantage+)
+        // - SEM promoted_object na campanha (vai no adset)
         const campaignBody = {
-          name: `${config.objective || 'OUTCOME_SALES'} Campaign ${i} - Auto`,
-          objective: config.objective || 'OUTCOME_SALES',
+          name: campaignName,
+          objective: config.objective,
           status: 'PAUSED',
           special_ad_categories: []
         };
-
         if (config.budget_type === 'CBO' && config.daily_budget) {
           campaignBody.daily_budget = Math.round(config.daily_budget * 100);
         }
 
-        if (config.disable_advantage_plus) {
-          campaignBody.buying_type = 'AUCTION';
-        }
-
-        // promoted_object na CAMPANHA para OUTCOME_SALES/OUTCOME_LEADS (v21.0 exige isso)
-        if (['OUTCOME_SALES', 'OUTCOME_LEADS'].includes(config.objective)) {
-          campaignBody.promoted_object = {
-            pixel_id: sel.pixelId,
-            custom_event_type: conversionEvent
-          };
-        } else if (config.objective === 'OUTCOME_ENGAGEMENT') {
-          campaignBody.promoted_object = { page_id: sel.pageId };
-        }
-
-        const cleanId = accountId.replace('act_', '');
         const campaignData = await graphPost(`act_${cleanId}/campaigns`, accessToken, campaignBody);
-
         if (campaignData.error) {
-          results.push({ accountId, campaignName: `Campaign ${i}`, success: false, error: campaignData.error.message });
+          results.push({ accountId, step: 'Campaign', success: false, error: campaignData.error.message });
           continue;
         }
+        console.log(`✅ Campanha: ${campaignData.id}`);
 
-        console.log(`✅ Campanha criada: ${campaignData.id}`);
-
-        // 2. Criar Ad Set — MÍNIMO para OUTCOME_* na v21.0
-        // NÃO enviar: optimization_goal, billing_event, promoted_object (já está na campanha)
-        // A Meta infere tudo do objetivo da campanha + promoted_object da campanha
+        // ===== 2. AD SET =====
+        // Estrutura correta API v21.0 para OUTCOME_SALES com Advantage+:
+        // - optimization_goal: 'OFFSITE_CONVERSIONS' (para "Maximizar o número de conversões")
+        // - billing_event: 'IMPRESSIONS' (OBRIGATÓRIO para Advantage+ Sales)
+        // - promoted_object: { pixel_id, custom_event_type } NO ADSET
+        // - targeting MÍNIMO obrigatório: geo_locations + age_min/age_max (Advantage+ exige)
+        // - SEM genders/locales opcionais (podem conflitar com Advantage+)
         const adSetBody = {
-          name: `AdSet ${i} - Auto`,
+          name: adsetName,
           campaign_id: campaignData.id,
           status: 'PAUSED',
-          daily_budget: config.budget_type === 'ABO' && config.daily_budget ? Math.round(config.daily_budget * 100) : undefined,
+          optimization_goal: 'OFFSITE_CONVERSIONS',
+          billing_event: 'IMPRESSIONS', // OBRIGATÓRIO para Advantage+ Sales
+          promoted_object: {
+            pixel_id: pixelId,
+            custom_event_type: conversionEvent
+          },
+          // Targeting MÍNIMO obrigatório para Advantage+ Sales (geo + idade)
           targeting: {
-            age_min: config.age_min || 25,
-            age_max: config.age_max || 45,
-            genders: config.gender === 'male' ? 1 : config.gender === 'female' ? 2 : 0,
-            locales: [6] // Português Brasil
+            age_min: config.age_min || 18,
+            age_max: config.age_max || 65,
+            geo_locations: { countries: ['BR'] }
+            // SEM genders (Advantage+ gerencia automaticamente)
+            // SEM locales (Advantage+ gerencia automaticamente)
           }
         };
-        console.log(`📋 AdSet MÍNIMO (sem optimization_goal/billing_event/promoted_object) — objetivo=${config.objective}, event=${conversionEvent}`);
 
-        const adSetData = await graphPost(`act_${cleanId}/adsets`, accessToken, adSetBody);
+        // Posicionamentos manuais NÃO aplicáveis para Advantage+ Sales (Meta gerencia)
+        console.log(`📋 AdSet Advantage+ Sales: optimization_goal=OFFSITE_CONVERSIONS, billing_event=IMPRESSIONS, targeting mínimo (geo + idade)`);
 
-        if (adSetData.error) {
-          results.push({ accountId, campaignName: `Campaign ${i}`, success: false, error: `AdSet: ${adSetData.error.message}` });
-          continue;
+        // Orçamento ABO
+        if (config.budget_type === 'ABO' && config.daily_budget) {
+          adSetBody.daily_budget = Math.round(config.daily_budget * 100);
         }
 
-        console.log(`✅ AdSet criado: ${adSetData.id}`);
+        // Estratégia de lance (bid_strategy) — só para ABO
+        if (config.budget_type === 'ABO' && config.bid_strategy && config.bid_strategy !== 'LOWEST_COST_WITHOUT_CAP') {
+          adSetBody.bid_strategy = config.bid_strategy;
+        }
 
-        // 3. Criar Ad Creative
+        // Limite de gastos do adset (spend_cap)
+        if (config.adset_spend_cap) {
+          adSetBody.spend_cap = Math.round(config.adset_spend_cap * 100);
+        }
+
+        // Programação
+        if (config.start_time && config.start_time !== 'immediate') {
+          adSetBody.start_time = config.start_time;
+        }
+        if (config.end_time) {
+          adSetBody.end_time = config.end_time;
+        }
+
+        // Criativo dinâmico
+        if (config.dynamic_creative) {
+          adSetBody.dynamic_creative_spec = { enabled: true };
+        }
+
+        console.log(`📋 AdSet body final:`, JSON.stringify(adSetBody).slice(0, 500));
+        const adSetData = await graphPost(`act_${cleanId}/adsets`, accessToken, adSetBody);
+        if (adSetData.error) {
+          results.push({ accountId, step: 'AdSet', campaignId: campaignData.id, success: false, error: adSetData.error.message });
+          continue;
+        }
+        console.log(`✅ AdSet: ${adSetData.id}`);
+
+        // ===== 3. AD CREATIVE =====
         const finalUrl = config.website_url || '';
         const urlWithParams = config.url_params ? `${finalUrl}${finalUrl.includes('?') ? '&' : '?'}${config.url_params}` : finalUrl;
         const displayUrl = config.display_link || finalUrl;
@@ -572,69 +500,55 @@ app.post('/api/campaigns/create', async (req, res) => {
         const creativeBody = {
           name: `Creative ${i} - Auto`,
           object_story_spec: {
-            page_id: sel.pageId,
+            page_id: pageId,
             link_data: {
               message: config.primary_text || '',
               name: config.headline || '',
               description: config.description || '',
               link: urlWithParams,
-              display_link: displayUrl,
-              call_to_action: {
-                type: config.call_to_action || 'LEARN_MORE'
-              }
+              call_to_action: { type: config.call_to_action || 'LEARN_MORE' }
             }
           }
         };
 
-        const creativeData = await graphPost(`act_${cleanId}/adcreatives`, accessToken, creativeBody);
-
-        if (creativeData.error) {
-          results.push({ accountId, campaignName: `Campaign ${i}`, success: false, error: `Creative: ${creativeData.error.message}` });
-          continue;
+        // Instagram actor (se disponível)
+        if (instagramId) {
+          creativeBody.object_story_spec.instagram_actor_id = instagramId;
         }
 
-        console.log(`✅ Creative criado: ${creativeData.id}`);
+        const creativeData = await graphPost(`act_${cleanId}/adcreatives`, accessToken, creativeBody);
+        if (creativeData.error) {
+          results.push({ accountId, step: 'Creative', campaignId: campaignData.id, adSetId: adSetData.id, success: false, error: creativeData.error.message });
+          continue;
+        }
+        console.log(`✅ Creative: ${creativeData.id}`);
 
-        // 4. Criar Ad
+        // ===== 4. AD =====
         const adBody = {
-          name: `Ad ${i} - Auto`,
+          name: adName,
           adset_id: adSetData.id,
           creative: { creative_id: creativeData.id },
           status: 'PAUSED'
         };
 
         const adData = await graphPost(`act_${cleanId}/ads`, accessToken, adBody);
-
         if (adData.error) {
-          results.push({ accountId, campaignName: `Campaign ${i}`, success: false, error: `Ad: ${adData.error.message}` });
+          results.push({ accountId, step: 'Ad', campaignId: campaignData.id, adSetId: adSetData.id, creativeId: creativeData.id, success: false, error: adData.error.message });
           continue;
         }
-
-        console.log(`✅ Ad criado: ${adData.id}`);
+        console.log(`✅ Ad: ${adData.id}`);
 
         results.push({
-          accountId,
-          campaignId: campaignData.id,
-          adSetId: adSetData.id,
-          creativeId: creativeData.id,
-          adId: adData.id,
-          campaignName: campaignBody.name,
-          pixelId: sel.pixelId,
-          pageId: sel.pageId,
-          advertiserId: sel.advertiserId,
-          advantagePlusDisabled: !!config.disable_advantage_plus,
-          websiteUrl: urlWithParams,
-          displayLink: displayUrl,
-          primaryText: config.primary_text,
-          headline: config.headline,
-          description: config.description,
-          callToAction: config.call_to_action,
+          accountId, campaignId: campaignData.id, adSetId: adSetData.id,
+          creativeId: creativeData.id, adId: adData.id,
+          campaignName, adsetName, adName,
+          websiteUrl: urlWithParams, callToAction: config.call_to_action,
           success: true
         });
 
       } catch (err) {
-        console.error(`❌ Exceção ao criar campanha ${i}:`, err);
-        results.push({ accountId, campaignName: `Campaign ${i}`, success: false, error: err.message });
+        console.error(`❌ Exceção campanha ${i}:`, err);
+        results.push({ accountId, step: 'Exception', success: false, error: err.message });
       }
     }
   }
@@ -646,6 +560,6 @@ app.post('/api/campaigns/create', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 Backend rodando em http://localhost:${PORT}`);
   console.log(`📋 FRONTEND_URL: ${process.env.FRONTEND_URL || '(não definido)'}`);
-  console.log(`📋 META_APP_ID: ${process.env.META_APP_ID ? '✓ definido' : '✗ NÃO DEFINIDO'}`);
+  console.log(`📋 META_APP_ID: ${process.env.META_APP_ID ? '✓' : '✗ NÃO DEFINIDO'}`);
   console.log(`📋 META_REDIRECT_URI: ${process.env.META_REDIRECT_URI || '(não definido)'}`);
 });
