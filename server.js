@@ -62,14 +62,29 @@ async function graphGet(path, accessToken, params = {}) {
 
 async function graphPost(path, accessToken, body) {
   const url = `https://graph.facebook.com/${process.env.META_API_VERSION}/${path}`;
-  console.log(`📤 Graph POST: ${path}`, JSON.stringify(body).slice(0, 300));
+  const fullBody = { ...body, access_token: accessToken };
+  console.log(`📤 Graph POST: ${path}`);
+  console.log(`📤 REQUEST BODY:`, JSON.stringify(body, null, 2));
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...body, access_token: accessToken })
+    body: JSON.stringify(fullBody)
   });
   const data = await res.json();
-  if (data.error) console.error(`❌ Graph POST error [${path}]:`, data.error);
+  if (data.error) {
+    console.error(`❌ Graph POST ERROR [${path}]:`);
+    console.error(`   message:        ${data.error.message}`);
+    console.error(`   type:           ${data.error.type || '(none)'}`);
+    console.error(`   code:           ${data.error.code || '(none)'}`);
+    console.error(`   error_subcode:  ${data.error.error_subcode || '(none)'}`);
+    console.error(`   error_user_title: ${data.error.error_user_title || '(none)'}`);
+    console.error(`   error_user_msg:   ${data.error.error_user_msg || '(none)'}`);
+    console.error(`   error_data:     ${JSON.stringify(data.error.error_data) || '(none)'}`);
+    console.error(`   fbtrace_id:     ${data.error.fbtrace_id || '(none)'}`);
+    console.error(`   FULL ERROR:`, JSON.stringify(data.error, null, 2));
+  } else {
+    console.log(`✅ Graph POST OK [${path}]: id=${data.id || '(no id)'}`);
+  }
   return data;
 }
 
@@ -427,125 +442,52 @@ app.post('/api/campaigns/create', async (req, res) => {
         console.log(`✅ Campanha: ${campaignData.id}`);
 
         // ===== 2. AD SET =====
-        // FALLBACK EM CASCATA: tenta múltiplas estruturas até uma funcionar.
-        // A Meta varia as regras por conta/versão/app — isso garante que funcione sempre.
-        const baseTargeting = {
-          geo_locations: { countries: ['BR'] },
-          age_min: config.age_min || 18,
-          age_max: config.age_max || 65
+        // Estrutura CANÔNICA API v21.0 ODAX para OUTCOME_SALES:
+        // Campos OBRIGATÓRIOS: destination_type, optimization_goal, billing_event, promoted_object, targeting
+        // NÃO usar fallback — se falhar, o erro completo é repassado ao usuário para diagnóstico.
+        const adSetBody = {
+          name: adsetName,
+          campaign_id: campaignData.id,
+          status: 'PAUSED',
+          destination_type: 'WEBSITE',
+          optimization_goal: 'OFFSITE_CONVERSIONS',
+          billing_event: 'IMPRESSIONS',
+          promoted_object: {
+            pixel_id: pixelId,
+            custom_event_type: conversionEvent
+          },
+          targeting: {
+            geo_locations: { countries: ['BR'] },
+            age_min: config.age_min || 18,
+            age_max: config.age_max || 65
+          }
         };
 
-        const adSetVariants = [
-          {
-            label: 'ODAX completo (destination_type + opt_goal + billing + promoted)',
-            body: {
-              name: adsetName,
-              campaign_id: campaignData.id,
-              status: 'PAUSED',
-              destination_type: 'WEBSITE',
-              optimization_goal: 'OFFSITE_CONVERSIONS',
-              billing_event: 'IMPRESSIONS',
-              promoted_object: { pixel_id: pixelId, custom_event_type: conversionEvent },
-              targeting: baseTargeting
-            }
-          },
-          {
-            label: 'Sem destination_type (opt_goal + billing + promoted)',
-            body: {
-              name: adsetName,
-              campaign_id: campaignData.id,
-              status: 'PAUSED',
-              optimization_goal: 'OFFSITE_CONVERSIONS',
-              billing_event: 'IMPRESSIONS',
-              promoted_object: { pixel_id: pixelId, custom_event_type: conversionEvent },
-              targeting: baseTargeting
-            }
-          },
-          {
-            label: 'Sem billing_event (opt_goal + promoted + destination)',
-            body: {
-              name: adsetName,
-              campaign_id: campaignData.id,
-              status: 'PAUSED',
-              destination_type: 'WEBSITE',
-              optimization_goal: 'OFFSITE_CONVERSIONS',
-              promoted_object: { pixel_id: pixelId, custom_event_type: conversionEvent },
-              targeting: baseTargeting
-            }
-          },
-          {
-            label: 'Mínimo ODAX (destination + opt_goal + promoted, sem billing)',
-            body: {
-              name: adsetName,
-              campaign_id: campaignData.id,
-              status: 'PAUSED',
-              destination_type: 'WEBSITE',
-              optimization_goal: 'OFFSITE_CONVERSIONS',
-              promoted_object: { pixel_id: pixelId, custom_event_type: conversionEvent },
-              targeting: baseTargeting
-            }
-          },
-          {
-            label: 'Legacy conversions (sem destination_type, sem billing)',
-            body: {
-              name: adsetName,
-              campaign_id: campaignData.id,
-              status: 'PAUSED',
-              optimization_goal: 'OFFSITE_CONVERSIONS',
-              promoted_object: { pixel_id: pixelId, custom_event_type: conversionEvent },
-              targeting: baseTargeting
-            }
-          },
-          {
-            label: 'Ultra-mínimo (apenas promoted_object + targeting)',
-            body: {
-              name: adsetName,
-              campaign_id: campaignData.id,
-              status: 'PAUSED',
-              promoted_object: { pixel_id: pixelId, custom_event_type: conversionEvent },
-              targeting: baseTargeting
-            }
-          }
-        ];
-
-        let adSetData = null;
-        for (const variant of adSetVariants) {
-          const testBody = { ...variant.body };
-          // Adiciona opcionais apenas no primeiro attempt (para não poluir fallbacks)
-          if (variant === adSetVariants[0]) {
-            if (config.budget_type === 'ABO' && config.daily_budget) {
-              testBody.daily_budget = Math.round(config.daily_budget * 100);
-            }
-            if (config.budget_type === 'ABO' && config.bid_strategy && config.bid_strategy !== 'LOWEST_COST_WITHOUT_CAP') {
-              testBody.bid_strategy = config.bid_strategy;
-            }
-            if (config.adset_spend_cap) {
-              testBody.spend_cap = Math.round(config.adset_spend_cap * 100);
-            }
-            if (config.start_time && config.start_time !== 'immediate') {
-              testBody.start_time = config.start_time;
-            }
-            if (config.end_time) {
-              testBody.end_time = config.end_time;
-            }
-            if (config.dynamic_creative) {
-              testBody.dynamic_creative_spec = { enabled: true };
-            }
-          }
-
-          console.log(`🔄 Tentando AdSet: ${variant.label}`);
-          adSetData = await graphPost(`act_${cleanId}/adsets`, accessToken, testBody);
-          if (!adSetData.error) {
-            console.log(`✅ AdSet criado com: ${variant.label} → ${adSetData.id}`);
-            break;
-          }
-          console.log(`❌ Falhou (${variant.label}): ${adSetData.error.message}`);
+        // Orçamento/lance NO ADSET apenas se ABO (CBO = orçamento na campanha)
+        if (config.budget_type === 'ABO' && config.daily_budget) {
+          adSetBody.daily_budget = Math.round(config.daily_budget * 100);
+        }
+        if (config.budget_type === 'ABO' && config.bid_strategy && config.bid_strategy !== 'LOWEST_COST_WITHOUT_CAP') {
+          adSetBody.bid_strategy = config.bid_strategy;
+        }
+        if (config.adset_spend_cap) {
+          adSetBody.spend_cap = Math.round(config.adset_spend_cap * 100);
+        }
+        if (config.start_time && config.start_time !== 'immediate') {
+          adSetBody.start_time = config.start_time;
+        }
+        if (config.end_time) {
+          adSetBody.end_time = config.end_time;
+        }
+        if (config.dynamic_creative) {
+          adSetBody.dynamic_creative_spec = { enabled: true };
         }
 
-        if (!adSetData || adSetData.error) {
-          const lastError = adSetData?.error?.message || 'Todas as variantes falharam';
-          console.error(`❌ TODAS as variantes de AdSet falharam para ${accountId}`);
-          results.push({ accountId, step: 'AdSet', campaignId: campaignData.id, success: false, error: lastError });
+        console.log(`📋 AdSet body final:`, JSON.stringify(adSetBody, null, 2));
+        const adSetData = await graphPost(`act_${cleanId}/adsets`, accessToken, adSetBody);
+        if (adSetData.error) {
+          const errDetail = adSetData.error.error_user_msg || adSetData.error.error_user_title || adSetData.error.message;
+          results.push({ accountId, step: 'AdSet', campaignId: campaignData.id, success: false, error: errDetail, fullError: adSetData.error });
           continue;
         }
         console.log(`✅ AdSet: ${adSetData.id}`);
