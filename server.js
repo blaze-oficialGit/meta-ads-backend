@@ -476,16 +476,10 @@ function buildAdSetBody(objective, config, campaignId, pixelId, conversionEvent,
     body.daily_budget = Math.round(config.daily_budget * 100);
   }
 
-  // bid_strategy: só envia se válido e com bid_amount quando necessário
-  if (config.bid_strategy && config.bid_strategy !== 'LOWEST_COST_WITHOUT_CAP') {
-    const needsBidAmount = ['BID_CAP', 'COST_CAP', 'TARGET_COST'].includes(config.bid_strategy);
-    if (needsBidAmount && config.bid_amount > 0) {
-      body.bid_strategy = config.bid_strategy;
-      body.bid_amount = Math.round(config.bid_amount * 100);
-    } else if (!needsBidAmount) {
-      body.bid_strategy = config.bid_strategy;
-    }
-  }
+  // bid_strategy: NÃO ENVIAR NUNCA no AdSet para evitar "Valor do lance obrigatório"
+  // A Meta usa Lowest Cost automaticamente quando nenhum bid_strategy é enviado.
+  // Se precisar de COST_CAP/BID_CAP no futuro, adicionar apenas após validar que bid_amount > 0
+  // E que a conta aceita esses valores para o objetivo escolhido.
 
   // Opcionais
   if (config.adset_spend_cap) body.spend_cap = Math.round(config.adset_spend_cap * 100);
@@ -686,3 +680,5 @@ app.listen(PORT, () => {
   console.log(`📋 META_APP_ID: ${process.env.META_APP_ID ? '✓' : '✗ NÃO DEFINIDO'}`);
   console.log(`📋 META_REDIRECT_URI: ${process.env.META_REDIRECT_URI || '(não definido)'}`);
 });
+
+
