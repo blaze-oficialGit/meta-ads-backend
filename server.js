@@ -1,6 +1,5 @@
 import express from 'express';
 import cors from 'cors';
-import session from 'express-session';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
 
@@ -9,28 +8,42 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// --- Middleware ---
-app.use(cors({ origin: process.env.FRONTEND_URL, credentials: true }));
-app.use(express.json());
-app.use(session({
-  secret: process.env.SESSION_SECRET || 'dev-secret-change-me',
-  resave: false,
-  saveUninitialized: false,
-  cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 }
+// Railway usa proxy reverso
+app.set('trust proxy', 1);
+
+// CORS — permite o frontend Vercel
+app.use(cors({
+  origin: process.env.FRONTEND_URL || '*',
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
+app.use(express.json());
 
 // --- Armazenamento em Memória (MVP) ---
-const store = {
-  tokens: {},
-  businesses: {},
-};
+// Chave = sessionToken (gerado após login), valor = { accessToken, businesses }
+const sessions = {};
+
+// Estado OAuth temporário (state → expira em 10 min)
+const oauthStates = {};
+
+// Middleware: extrai sessionToken do header Authorization
+function getSession(req) {
+  const auth = req.headers.authorization || '';
+  const token = auth.replace('Bearer ', '');
+  return token && sessions[token] ? { token, data: sessions[token] } : null;
+}
 
 // --- ROTAS DE AUTENTICAÇÃO META ---
 
-// 1. Iniciar Login
+// 1. Iniciar Login — gera state e redireciona para Facebook
 app.get('/api/auth/login', (req, res) => {
   const state = crypto.randomBytes(16).toString('hex');
-  req.session.oauthState = state;
+  oauthStates[state] = Date.now(); // salva com timestamp
+
+  // Limpa states antigos (> 10 min)
+  const now = Date.now();
+  Object.keys(oauthStates).forEach(k => { if (now - oauthStates[k] > 600000) delete oauthStates[k]; });
 
   const params = new URLSearchParams({
     client_id: process.env.META_APP_ID,
@@ -43,16 +56,23 @@ app.get('/api/auth/login', (req, res) => {
   res.redirect(`https://www.facebook.com/${process.env.META_API_VERSION}/dialog/oauth?${params}`);
 });
 
-// 2. Callback do OAuth
+// 2. Callback do OAuth — troca código por token, busca contas, gera sessionToken
 app.get('/api/auth/callback', async (req, res) => {
-  const { code, state } = req.query;
+  const { code, state, error } = req.query;
 
-  if (!code || state !== req.session.oauthState) {
+  if (error) {
+    return res.redirect(`${process.env.FRONTEND_URL}?error=${error}`);
+  }
+
+  if (!code || !state || !oauthStates[state]) {
     return res.redirect(`${process.env.FRONTEND_URL}?error=invalid_oauth`);
   }
 
+  // Consome o state (uso único)
+  delete oauthStates[state];
+
   try {
-    // Trocar código por token
+    // Trocar código por token de curta duração
     const tokenRes = await fetch(
       `https://graph.facebook.com/${process.env.META_API_VERSION}/oauth/access_token?` +
       new URLSearchParams({
@@ -65,7 +85,7 @@ app.get('/api/auth/callback', async (req, res) => {
     const tokenData = await tokenRes.json();
     if (tokenData.error) throw new Error(tokenData.error.message);
 
-    // Obter token de longa duração
+    // Trocar por token de longa duração (60 dias)
     const longLivedRes = await fetch(
       `https://graph.facebook.com/${process.env.META_API_VERSION}/oauth/access_token?` +
       new URLSearchParams({
@@ -76,13 +96,11 @@ app.get('/api/auth/callback', async (req, res) => {
       })
     );
     const longLivedData = await longLivedRes.json();
-
-    const userId = 'current_user';
-    store.tokens[userId] = longLivedData.access_token;
+    const metaAccessToken = longLivedData.access_token || tokenData.access_token;
 
     // Buscar Business Managers e Contas
     const businessesRes = await fetch(
-      `https://graph.facebook.com/${process.env.META_API_VERSION}/me/businesses?fields=name,owned_ad_accounts{name,account_status,currency}&access_token=${longLivedData.access_token}`
+      `https://graph.facebook.com/${process.env.META_API_VERSION}/me/businesses?fields=name,owned_ad_accounts{name,account_status,currency}&access_token=${metaAccessToken}`
     );
     const businessesData = await businessesRes.json();
 
@@ -98,10 +116,10 @@ app.get('/api/auth/callback', async (req, res) => {
       }))
     }));
 
-    // Fallback para contas pessoais
+    // Fallback: contas pessoais (sem BM)
     if (businesses.length === 0) {
       const directRes = await fetch(
-        `https://graph.facebook.com/${process.env.META_API_VERSION}/me/adaccounts?fields=name,account_status,currency&access_token=${longLivedData.access_token}`
+        `https://graph.facebook.com/${process.env.META_API_VERSION}/me/adaccounts?fields=name,account_status,currency&access_token=${metaAccessToken}`
       );
       const directData = await directRes.json();
       if (directData.data?.length > 0) {
@@ -119,23 +137,28 @@ app.get('/api/auth/callback', async (req, res) => {
       }
     }
 
-    store.businesses[userId] = businesses;
-    res.redirect(`${process.env.FRONTEND_URL}?auth=success`);
+    // Gera sessionToken único e salva tudo em memória
+    const sessionToken = crypto.randomBytes(32).toString('hex');
+    sessions[sessionToken] = { accessToken: metaAccessToken, businesses };
+
+    console.log(`✅ Login OK — ${businesses.length} BM(s), sessionToken: ${sessionToken.slice(0,8)}...`);
+
+    // Redireciona para frontend com o token na URL
+    res.redirect(`${process.env.FRONTEND_URL}?auth=success&token=${sessionToken}`);
 
   } catch (err) {
     console.error('OAuth error:', err);
-    res.redirect(`${process.env.FRONTEND_URL}?error=oauth_failed`);
+    res.redirect(`${process.env.FRONTEND_URL}?error=oauth_failed&msg=${encodeURIComponent(err.message)}`);
   }
 });
 
-// 3. Verificar Status
+// 3. Verificar Status — usa sessionToken do header Authorization
 app.get('/api/auth/status', (req, res) => {
-  const userId = 'current_user';
-  const isConnected = !!store.tokens[userId];
-  res.json({
-    connected: isConnected,
-    businesses: isConnected ? store.businesses[userId] || [] : []
-  });
+  const session = getSession(req);
+  if (!session) {
+    return res.json({ connected: false, businesses: [] });
+  }
+  res.json({ connected: true, businesses: session.data.businesses });
 });
 
 // --- ROTA DE INTERPRETAÇÃO IA ---
@@ -186,10 +209,10 @@ age_min (number), age_max (number), start_time (HH:MM or "immediate").`
 // --- ROTA DE CRIAÇÃO DE CAMPANHAS ---
 app.post('/api/campaigns/create', async (req, res) => {
   const { config, accountIds } = req.body;
-  const userId = 'current_user';
-  const accessToken = store.tokens[userId];
+  const session = getSession(req);
 
-  if (!accessToken) return res.status(401).json({ error: 'Not authenticated' });
+  if (!session) return res.status(401).json({ error: 'Not authenticated' });
+  const accessToken = session.data.accessToken;
   if (!accountIds?.length) return res.status(400).json({ error: 'No accounts selected' });
 
   const results = [];
