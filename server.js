@@ -531,36 +531,38 @@ app.post('/api/campaigns/create', async (req, res) => {
         const conversionEvent = config.conversion_event || defaultEventByObjective[config.objective] || 'PURCHASE';
         console.log(`🎯 Evento de conversão: ${conversionEvent} (objetivo: ${config.objective})`);
 
-        // Mapeamento oficial Meta API v21.0 para objetivos OUTCOME_*
+        // Mapeamento Meta API v21.0 para objetivos OUTCOME_*
+        // IMPORTANTE: v21.0 NÃO aceita billing_event junto com optimization_goal para OUTCOME_*
+        // e usa 'VALUE' ou 'OFFSITE_CONVERSIONS' sem billing_event explícito
         const objectiveConfig = {
           OUTCOME_SALES: {
             optimization_goal: 'OFFSITE_CONVERSIONS',
-            billing_event: 'IMPRESSIONS',
+            billing_event: null, // NÃO enviar billing_event para OUTCOME_* na v21.0
             promoted_object: { pixel_id: sel.pixelId, custom_event_type: conversionEvent }
           },
           OUTCOME_LEADS: {
             optimization_goal: 'LEAD_GENERATION',
-            billing_event: 'IMPRESSIONS',
+            billing_event: null,
             promoted_object: { pixel_id: sel.pixelId, custom_event_type: conversionEvent }
           },
           OUTCOME_TRAFFIC: {
             optimization_goal: 'LINK_CLICKS',
-            billing_event: 'LINK_CLICKS',
+            billing_event: null,
             promoted_object: null
           },
           OUTCOME_ENGAGEMENT: {
             optimization_goal: 'POST_ENGAGEMENT',
-            billing_event: 'IMPRESSIONS',
+            billing_event: null,
             promoted_object: { page_id: sel.pageId }
           },
           OUTCOME_AWARENESS: {
             optimization_goal: 'REACH',
-            billing_event: 'IMPRESSIONS',
+            billing_event: null,
             promoted_object: null
           },
           OUTCOME_APP_PROMOTION: {
             optimization_goal: 'APP_INSTALLS',
-            billing_event: 'IMPRESSIONS',
+            billing_event: null,
             promoted_object: null
           }
         };
@@ -571,7 +573,7 @@ app.post('/api/campaigns/create', async (req, res) => {
           campaign_id: campaignData.id,
           status: 'PAUSED',
           optimization_goal: objCfg.optimization_goal,
-          billing_event: objCfg.billing_event,
+          // billing_event OMITIDO para OUTCOME_* na v21.0 (causa "Invalid parameter" se enviado)
           daily_budget: config.budget_type === 'ABO' && config.daily_budget ? Math.round(config.daily_budget * 100) : undefined,
           targeting: {
             age_min: config.age_min || 25,
@@ -584,7 +586,7 @@ app.post('/api/campaigns/create', async (req, res) => {
         if (objCfg.promoted_object) {
           adSetBody.promoted_object = objCfg.promoted_object;
         }
-        console.log(`📋 AdSet config: goal=${objCfg.optimization_goal}, billing=${objCfg.billing_event}, objective=${config.objective}`);
+        console.log(`📋 AdSet config: goal=${objCfg.optimization_goal}, billing_event=OMITIDO, objective=${config.objective}, event=${conversionEvent}`);
 
         const adSetData = await graphPost(`act_${cleanId}/adsets`, accessToken, adSetBody);
 
