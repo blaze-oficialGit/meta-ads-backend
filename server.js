@@ -490,9 +490,21 @@ app.post('/api/campaigns/create', async (req, res) => {
       try {
         console.log(`🚀 Criando campanha ${i}/${config.campaigns} para ${accountId}...`);
 
-        // 1. Criar Campaign
+        // Nível de conversão específico escolhido pelo usuário (custom_event_type)
+        const defaultEventByObjective = {
+          OUTCOME_SALES: 'PURCHASE',
+          OUTCOME_LEADS: 'LEAD',
+          OUTCOME_TRAFFIC: null,
+          OUTCOME_ENGAGEMENT: null,
+          OUTCOME_AWARENESS: null,
+          OUTCOME_APP_PROMOTION: null
+        };
+        const conversionEvent = config.conversion_event || defaultEventByObjective[config.objective] || 'PURCHASE';
+        console.log(`🎯 Evento de conversão: ${conversionEvent} (objetivo: ${config.objective})`);
+
+        // 1. Criar Campaign — para OUTCOME_* na v21.0, promoted_object vai AQUI (não no adset)
         const campaignBody = {
-          name: `${config.objective || 'SALES'} Campaign ${i} - Auto`,
+          name: `${config.objective || 'OUTCOME_SALES'} Campaign ${i} - Auto`,
           objective: config.objective || 'OUTCOME_SALES',
           status: 'PAUSED',
           special_ad_categories: []
@@ -506,6 +518,16 @@ app.post('/api/campaigns/create', async (req, res) => {
           campaignBody.buying_type = 'AUCTION';
         }
 
+        // promoted_object na CAMPANHA para OUTCOME_SALES/OUTCOME_LEADS (v21.0 exige isso)
+        if (['OUTCOME_SALES', 'OUTCOME_LEADS'].includes(config.objective)) {
+          campaignBody.promoted_object = {
+            pixel_id: sel.pixelId,
+            custom_event_type: conversionEvent
+          };
+        } else if (config.objective === 'OUTCOME_ENGAGEMENT') {
+          campaignBody.promoted_object = { page_id: sel.pageId };
+        }
+
         const cleanId = accountId.replace('act_', '');
         const campaignData = await graphPost(`act_${cleanId}/campaigns`, accessToken, campaignBody);
 
@@ -516,64 +538,13 @@ app.post('/api/campaigns/create', async (req, res) => {
 
         console.log(`✅ Campanha criada: ${campaignData.id}`);
 
-        // 2. Criar Ad Set — parâmetros variam conforme o objetivo OUTCOME_*
-        // Nível de conversão específico escolhido pelo usuário (custom_event_type)
-        // Padrões por objetivo caso o usuário não especifique
-        const defaultEventByObjective = {
-          OUTCOME_SALES: 'PURCHASE',
-          OUTCOME_LEADS: 'LEAD',
-          OUTCOME_TRAFFIC: null,
-          OUTCOME_ENGAGEMENT: null,
-          OUTCOME_AWARENESS: null,
-          OUTCOME_APP_PROMOTION: null
-        };
-        // Evento final: usa o escolhido pelo usuário ou o padrão do objetivo
-        const conversionEvent = config.conversion_event || defaultEventByObjective[config.objective] || 'PURCHASE';
-        console.log(`🎯 Evento de conversão: ${conversionEvent} (objetivo: ${config.objective})`);
-
-        // Mapeamento Meta API v21.0 para objetivos OUTCOME_*
-        // IMPORTANTE: v21.0 NÃO aceita billing_event junto com optimization_goal para OUTCOME_*
-        // e usa 'VALUE' ou 'OFFSITE_CONVERSIONS' sem billing_event explícito
-        const objectiveConfig = {
-          OUTCOME_SALES: {
-            optimization_goal: 'OFFSITE_CONVERSIONS',
-            billing_event: null, // NÃO enviar billing_event para OUTCOME_* na v21.0
-            promoted_object: { pixel_id: sel.pixelId, custom_event_type: conversionEvent }
-          },
-          OUTCOME_LEADS: {
-            optimization_goal: 'LEAD_GENERATION',
-            billing_event: null,
-            promoted_object: { pixel_id: sel.pixelId, custom_event_type: conversionEvent }
-          },
-          OUTCOME_TRAFFIC: {
-            optimization_goal: 'LINK_CLICKS',
-            billing_event: null,
-            promoted_object: null
-          },
-          OUTCOME_ENGAGEMENT: {
-            optimization_goal: 'POST_ENGAGEMENT',
-            billing_event: null,
-            promoted_object: { page_id: sel.pageId }
-          },
-          OUTCOME_AWARENESS: {
-            optimization_goal: 'REACH',
-            billing_event: null,
-            promoted_object: null
-          },
-          OUTCOME_APP_PROMOTION: {
-            optimization_goal: 'APP_INSTALLS',
-            billing_event: null,
-            promoted_object: null
-          }
-        };
-        const objCfg = objectiveConfig[config.objective] || objectiveConfig.OUTCOME_SALES;
-
+        // 2. Criar Ad Set — MÍNIMO para OUTCOME_* na v21.0
+        // NÃO enviar: optimization_goal, billing_event, promoted_object (já está na campanha)
+        // A Meta infere tudo do objetivo da campanha + promoted_object da campanha
         const adSetBody = {
           name: `AdSet ${i} - Auto`,
           campaign_id: campaignData.id,
           status: 'PAUSED',
-          optimization_goal: objCfg.optimization_goal,
-          // billing_event OMITIDO para OUTCOME_* na v21.0 (causa "Invalid parameter" se enviado)
           daily_budget: config.budget_type === 'ABO' && config.daily_budget ? Math.round(config.daily_budget * 100) : undefined,
           targeting: {
             age_min: config.age_min || 25,
@@ -582,11 +553,7 @@ app.post('/api/campaigns/create', async (req, res) => {
             locales: [6] // Português Brasil
           }
         };
-        // Só adiciona promoted_object se existir para este objetivo
-        if (objCfg.promoted_object) {
-          adSetBody.promoted_object = objCfg.promoted_object;
-        }
-        console.log(`📋 AdSet config: goal=${objCfg.optimization_goal}, billing_event=OMITIDO, objective=${config.objective}, event=${conversionEvent}`);
+        console.log(`📋 AdSet MÍNIMO (sem optimization_goal/billing_event/promoted_object) — objetivo=${config.objective}, event=${conversionEvent}`);
 
         const adSetData = await graphPost(`act_${cleanId}/adsets`, accessToken, adSetBody);
 
