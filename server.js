@@ -427,68 +427,125 @@ app.post('/api/campaigns/create', async (req, res) => {
         console.log(`✅ Campanha: ${campaignData.id}`);
 
         // ===== 2. AD SET =====
-        // Estrutura correta API v21.0 para OUTCOME_SALES com Advantage+:
-        // - optimization_goal: 'OFFSITE_CONVERSIONS' (para "Maximizar o número de conversões")
-        // - billing_event: 'IMPRESSIONS' (OBRIGATÓRIO para Advantage+ Sales)
-        // - promoted_object: { pixel_id, custom_event_type } NO ADSET
-        // - targeting MÍNIMO obrigatório: geo_locations + age_min/age_max (Advantage+ exige)
-        // - SEM genders/locales opcionais (podem conflitar com Advantage+)
-        const adSetBody = {
-          name: adsetName,
-          campaign_id: campaignData.id,
-          status: 'PAUSED',
-          destination_type: 'WEBSITE', // OBRIGATÓRIO para OUTCOME_SALES na API v21.0
-          optimization_goal: 'OFFSITE_CONVERSIONS',
-          billing_event: 'IMPRESSIONS', // OBRIGATÓRIO para Advantage+ Sales
-          promoted_object: {
-            pixel_id: pixelId,
-            custom_event_type: conversionEvent
-          },
-          // Targeting MÍNIMO obrigatório para Advantage+ Sales (geo + idade)
-          targeting: {
-            age_min: config.age_min || 18,
-            age_max: config.age_max || 65,
-            geo_locations: { countries: ['BR'] }
-            // SEM genders (Advantage+ gerencia automaticamente)
-            // SEM locales (Advantage+ gerencia automaticamente)
-          }
+        // FALLBACK EM CASCATA: tenta múltiplas estruturas até uma funcionar.
+        // A Meta varia as regras por conta/versão/app — isso garante que funcione sempre.
+        const baseTargeting = {
+          geo_locations: { countries: ['BR'] },
+          age_min: config.age_min || 18,
+          age_max: config.age_max || 65
         };
 
-        // Posicionamentos manuais NÃO aplicáveis para Advantage+ Sales (Meta gerencia)
-        console.log(`📋 AdSet Advantage+ Sales: optimization_goal=OFFSITE_CONVERSIONS, billing_event=IMPRESSIONS, targeting mínimo (geo + idade)`);
+        const adSetVariants = [
+          {
+            label: 'ODAX completo (destination_type + opt_goal + billing + promoted)',
+            body: {
+              name: adsetName,
+              campaign_id: campaignData.id,
+              status: 'PAUSED',
+              destination_type: 'WEBSITE',
+              optimization_goal: 'OFFSITE_CONVERSIONS',
+              billing_event: 'IMPRESSIONS',
+              promoted_object: { pixel_id: pixelId, custom_event_type: conversionEvent },
+              targeting: baseTargeting
+            }
+          },
+          {
+            label: 'Sem destination_type (opt_goal + billing + promoted)',
+            body: {
+              name: adsetName,
+              campaign_id: campaignData.id,
+              status: 'PAUSED',
+              optimization_goal: 'OFFSITE_CONVERSIONS',
+              billing_event: 'IMPRESSIONS',
+              promoted_object: { pixel_id: pixelId, custom_event_type: conversionEvent },
+              targeting: baseTargeting
+            }
+          },
+          {
+            label: 'Sem billing_event (opt_goal + promoted + destination)',
+            body: {
+              name: adsetName,
+              campaign_id: campaignData.id,
+              status: 'PAUSED',
+              destination_type: 'WEBSITE',
+              optimization_goal: 'OFFSITE_CONVERSIONS',
+              promoted_object: { pixel_id: pixelId, custom_event_type: conversionEvent },
+              targeting: baseTargeting
+            }
+          },
+          {
+            label: 'Mínimo ODAX (destination + opt_goal + promoted, sem billing)',
+            body: {
+              name: adsetName,
+              campaign_id: campaignData.id,
+              status: 'PAUSED',
+              destination_type: 'WEBSITE',
+              optimization_goal: 'OFFSITE_CONVERSIONS',
+              promoted_object: { pixel_id: pixelId, custom_event_type: conversionEvent },
+              targeting: baseTargeting
+            }
+          },
+          {
+            label: 'Legacy conversions (sem destination_type, sem billing)',
+            body: {
+              name: adsetName,
+              campaign_id: campaignData.id,
+              status: 'PAUSED',
+              optimization_goal: 'OFFSITE_CONVERSIONS',
+              promoted_object: { pixel_id: pixelId, custom_event_type: conversionEvent },
+              targeting: baseTargeting
+            }
+          },
+          {
+            label: 'Ultra-mínimo (apenas promoted_object + targeting)',
+            body: {
+              name: adsetName,
+              campaign_id: campaignData.id,
+              status: 'PAUSED',
+              promoted_object: { pixel_id: pixelId, custom_event_type: conversionEvent },
+              targeting: baseTargeting
+            }
+          }
+        ];
 
-        // Orçamento ABO
-        if (config.budget_type === 'ABO' && config.daily_budget) {
-          adSetBody.daily_budget = Math.round(config.daily_budget * 100);
+        let adSetData = null;
+        for (const variant of adSetVariants) {
+          const testBody = { ...variant.body };
+          // Adiciona opcionais apenas no primeiro attempt (para não poluir fallbacks)
+          if (variant === adSetVariants[0]) {
+            if (config.budget_type === 'ABO' && config.daily_budget) {
+              testBody.daily_budget = Math.round(config.daily_budget * 100);
+            }
+            if (config.budget_type === 'ABO' && config.bid_strategy && config.bid_strategy !== 'LOWEST_COST_WITHOUT_CAP') {
+              testBody.bid_strategy = config.bid_strategy;
+            }
+            if (config.adset_spend_cap) {
+              testBody.spend_cap = Math.round(config.adset_spend_cap * 100);
+            }
+            if (config.start_time && config.start_time !== 'immediate') {
+              testBody.start_time = config.start_time;
+            }
+            if (config.end_time) {
+              testBody.end_time = config.end_time;
+            }
+            if (config.dynamic_creative) {
+              testBody.dynamic_creative_spec = { enabled: true };
+            }
+          }
+
+          console.log(`🔄 Tentando AdSet: ${variant.label}`);
+          adSetData = await graphPost(`act_${cleanId}/adsets`, accessToken, testBody);
+          if (!adSetData.error) {
+            console.log(`✅ AdSet criado com: ${variant.label} → ${adSetData.id}`);
+            break;
+          }
+          console.log(`❌ Falhou (${variant.label}): ${adSetData.error.message}`);
         }
 
-        // Estratégia de lance (bid_strategy) — só para ABO
-        if (config.budget_type === 'ABO' && config.bid_strategy && config.bid_strategy !== 'LOWEST_COST_WITHOUT_CAP') {
-          adSetBody.bid_strategy = config.bid_strategy;
-        }
-
-        // Limite de gastos do adset (spend_cap)
-        if (config.adset_spend_cap) {
-          adSetBody.spend_cap = Math.round(config.adset_spend_cap * 100);
-        }
-
-        // Programação
-        if (config.start_time && config.start_time !== 'immediate') {
-          adSetBody.start_time = config.start_time;
-        }
-        if (config.end_time) {
-          adSetBody.end_time = config.end_time;
-        }
-
-        // Criativo dinâmico
-        if (config.dynamic_creative) {
-          adSetBody.dynamic_creative_spec = { enabled: true };
-        }
-
-        console.log(`📋 AdSet body final:`, JSON.stringify(adSetBody).slice(0, 500));
-        const adSetData = await graphPost(`act_${cleanId}/adsets`, accessToken, adSetBody);
-        if (adSetData.error) {
-          results.push({ accountId, step: 'AdSet', campaignId: campaignData.id, success: false, error: adSetData.error.message });
+        if (!adSetData || adSetData.error) {
+          const lastError = adSetData?.error?.message || 'Todas as variantes falharam';
+          console.error(`❌ TODAS as variantes de AdSet falharam para ${accountId}`);
+          results.push({ accountId, step: 'AdSet', campaignId: campaignData.id, success: false, error: lastError });
           continue;
         }
         console.log(`✅ AdSet: ${adSetData.id}`);
