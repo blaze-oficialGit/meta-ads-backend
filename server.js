@@ -91,19 +91,45 @@ app.get('/api/auth/login', (req, res) => {
   });
 
   console.log(`🔐 Iniciando login OAuth, state=${state.slice(0,8)}...`);
+
+  // Salva state em cookie para sobreviver a reinícios do Railway
+  res.cookie('oauth_state', state, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'lax',
+    maxAge: 600000 // 10 minutos
+  });
+
   res.redirect(`https://www.facebook.com/${process.env.META_API_VERSION}/dialog/oauth?${params}`);
 });
 
 app.get('/api/auth/callback', async (req, res) => {
   const { code, state, error } = req.query;
-  console.log(`📥 Callback recebido: code=${!!code}, state=${!!state}, error=${error || 'none'}`);
+  const cookieState = req.cookies?.oauth_state;
 
-  if (error) return res.redirect(`${process.env.FRONTEND_URL}?error=${error}`);
-  if (!code || !state || !oauthStates[state]) {
-    console.error('❌ State inválido ou ausente');
-    return res.redirect(`${process.env.FRONTEND_URL}?error=invalid_oauth`);
+  console.log(`📥 Callback recebido: code=${!!code}, state=${!!state}, cookieState=${!!cookieState}, error=${error || 'none'}`);
+
+  if (error) {
+    res.clearCookie('oauth_state');
+    return res.redirect(`${process.env.FRONTEND_URL}?error=${error}`);
   }
-  delete oauthStates[state];
+
+  // Valida state: aceita se estiver na memória OU no cookie (sobrevive a reinícios)
+  const stateValid = (state && oauthStates[state]) || (state && cookieState && state === cookieState);
+
+  if (!code || !state || !stateValid) {
+    console.error('❌ State inválido ou ausente', {
+      hasState: !!state,
+      inMemory: !!(state && oauthStates[state]),
+      inCookie: !!(state && cookieState && state === cookieState)
+    });
+    res.clearCookie('oauth_state');
+    return res.redirect(`${process.env.FRONTEND_URL}?error=invalid_oauth&msg=${encodeURIComponent('State OAuth expirou ou é inválido. Tente novamente.')}`);
+  }
+
+  // Limpa state da memória e cookie
+  if (oauthStates[state]) delete oauthStates[state];
+  res.clearCookie('oauth_state');
 
   try {
     console.log('🔄 Trocando code por token...');
