@@ -356,7 +356,7 @@ ${creativeList || '(none)'}`;
   }
 });
 
-// Normaliza objetivo para OUTCOME_* (sua conta exige)
+// Normaliza objetivo para OUTCOME_* (ODAX API v21.0)
 function normalizeObjective(obj) {
   const map = {
     OUTCOME_AWARENESS: 'OUTCOME_AWARENESS', OUTCOME_TRAFFIC: 'OUTCOME_TRAFFIC',
@@ -373,6 +373,160 @@ function normalizeObjective(obj) {
     LOCAL_AWARENESS: 'OUTCOME_AWARENESS'
   };
   return map[obj] || 'OUTCOME_SALES';
+}
+
+// ===== MATRIZ DE COMPATIBILIDADE ODAX (API v21.0) =====
+// Define quais campos são válidos/obrigatórios por objetivo.
+// Referência: https://developers.facebook.com/docs/marketing-api/odax
+const OBJECTIVE_COMPAT = {
+  OUTCOME_SALES: {
+    destination_type: 'WEBSITE',
+    optimization_goal: 'OFFSITE_CONVERSIONS',
+    billing_event: 'IMPRESSIONS',
+    requires_pixel: true,
+    requires_promoted_object: true,
+    valid_conversion_events: ['PURCHASE','ADD_TO_CART','INITIATE_CHECKOUT','LEAD','COMPLETE_REGISTRATION','VIEW_CONTENT','SEARCH','CONTACT','SUBSCRIBE']
+  },
+  OUTCOME_LEADS: {
+    destination_type: 'WEBSITE',
+    optimization_goal: 'OFFSITE_CONVERSIONS',
+    billing_event: 'IMPRESSIONS',
+    requires_pixel: true,
+    requires_promoted_object: true,
+    valid_conversion_events: ['LEAD','COMPLETE_REGISTRATION','VIEW_CONTENT','CONTACT','SUBSCRIBE']
+  },
+  OUTCOME_TRAFFIC: {
+    destination_type: 'WEBSITE',
+    optimization_goal: 'LINK_CLICKS',
+    billing_event: 'IMPRESSIONS',
+    requires_pixel: false,
+    requires_promoted_object: false,
+    valid_conversion_events: []
+  },
+  OUTCOME_ENGAGEMENT: {
+    destination_type: null, // varia: WEBSITE, MESSENGER, INSTAGRAM, etc.
+    optimization_goal: 'POST_ENGAGEMENT',
+    billing_event: 'IMPRESSIONS',
+    requires_pixel: false,
+    requires_promoted_object: false,
+    valid_conversion_events: []
+  },
+  OUTCOME_AWARENESS: {
+    destination_type: null,
+    optimization_goal: 'REACH',
+    billing_event: 'IMPRESSIONS',
+    requires_pixel: false,
+    requires_promoted_object: false,
+    valid_conversion_events: []
+  },
+  OUTCOME_APP_PROMOTION: {
+    destination_type: 'APP',
+    optimization_goal: 'APP_INSTALLS',
+    billing_event: 'IMPRESSIONS',
+    requires_pixel: false,
+    requires_promoted_object: true, // precisa application_id
+    valid_conversion_events: []
+  }
+};
+
+// Constrói o corpo do AdSet dinamicamente baseado no objetivo
+function buildAdSetBody(objective, config, campaignId, pixelId, conversionEvent, adsetName) {
+  const compat = OBJECTIVE_COMPAT[objective] || OBJECTIVE_COMPAT.OUTCOME_SALES;
+
+  const body = {
+    name: adsetName,
+    campaign_id: campaignId,
+    status: 'PAUSED',
+    billing_event: compat.billing_event,
+    targeting: {
+      geo_locations: { countries: config.countries || ['BR'] },
+      age_min: config.age_min || 18,
+      age_max: config.age_max || 65
+    }
+  };
+
+  // destination_type: só se compatível com o objetivo
+  if (compat.destination_type) {
+    body.destination_type = compat.destination_type;
+  }
+
+  // optimization_goal: usa o do objetivo ou override se válido
+  body.optimization_goal = compat.optimization_goal;
+
+  // promoted_object: só se o objetivo exigir
+  if (compat.requires_promoted_object && compat.requires_pixel && pixelId) {
+    const promotedObj = { pixel_id: pixelId };
+    // custom_event_type só se for evento válido para este objetivo
+    if (conversionEvent && compat.valid_conversion_events.includes(conversionEvent)) {
+      promotedObj.custom_event_type = conversionEvent;
+    } else if (compat.valid_conversion_events.length > 0) {
+      // Fallback para primeiro evento válido se o selecionado não for compatível
+      promotedObj.custom_event_type = compat.valid_conversion_events[0];
+    }
+    body.promoted_object = promotedObj;
+  } else if (compat.requires_promoted_object && !compat.requires_pixel) {
+    // App promotion: promoted_object com application_id
+    if (config.application_id) {
+      body.promoted_object = { application_id: config.application_id };
+    }
+  }
+
+  // Orçamento ABO
+  if (config.budget_type === 'ABO' && config.daily_budget) {
+    body.daily_budget = Math.round(config.daily_budget * 100);
+  }
+
+  // bid_strategy: só envia se válido e com bid_amount quando necessário
+  if (config.bid_strategy && config.bid_strategy !== 'LOWEST_COST_WITHOUT_CAP') {
+    const needsBidAmount = ['BID_CAP', 'COST_CAP', 'TARGET_COST'].includes(config.bid_strategy);
+    if (needsBidAmount && config.bid_amount > 0) {
+      body.bid_strategy = config.bid_strategy;
+      body.bid_amount = Math.round(config.bid_amount * 100);
+    } else if (!needsBidAmount) {
+      body.bid_strategy = config.bid_strategy;
+    }
+  }
+
+  // Opcionais
+  if (config.adset_spend_cap) body.spend_cap = Math.round(config.adset_spend_cap * 100);
+  if (config.start_time && config.start_time !== 'immediate') body.start_time = config.start_time;
+  if (config.end_time) body.end_time = config.end_time;
+  if (config.dynamic_creative) body.dynamic_creative_spec = { enabled: true };
+
+  // Placements manuais (se não Advantage+)
+  if (config.placements === 'MANUAL' && config.manual_placements?.length > 0) {
+    body.targeting.publisher_platforms = [...new Set(config.manual_placements.map(p => {
+      if (p.startsWith('facebook')) return 'facebook';
+      if (p.startsWith('instagram')) return 'instagram';
+      if (p.startsWith('messenger')) return 'messenger';
+      if (p.startsWith('audience')) return 'audience_network';
+      return null;
+    }).filter(Boolean))];
+    // Mapeia posicionamentos específicos
+    const platformMap = {
+      facebook_feed: { facebook: ['feed'] },
+      facebook_right_column: { facebook: ['right_hand_column'] },
+      facebook_story: { facebook: ['story'] },
+      instagram_feed: { instagram: ['stream'] },
+      instagram_story: { instagram: ['story'] },
+      instagram_reels: { instagram: ['reels'] },
+      messenger_inbox: { messenger: ['messenger_home'] },
+      audience_network: { audience_network: ['classic'] }
+    };
+    const pos = {};
+    config.manual_placements.forEach(p => {
+      const mapping = platformMap[p];
+      if (mapping) {
+        Object.entries(mapping).forEach(([plat, vals]) => {
+          if (!pos[plat]) pos[plat] = [];
+          pos[plat].push(...vals);
+        });
+      }
+    });
+    if (Object.keys(pos).length > 0) body.targeting.device_platforms = ['mobile', 'desktop'];
+  }
+
+  return body;
 }
 
 // --- ROTA DE CRIAÇÃO DE CAMPANHAS COMPLETAS ---
@@ -395,8 +549,15 @@ app.post('/api/campaigns/create', async (req, res) => {
   const advertiserId = globalConfig?.advertiserId || session.data.globalConfig?.advertiserId;
   const instagramId = globalConfig?.instagramId || session.data.globalConfig?.instagramId;
 
-  if (!pixelId || !pageId) {
-    return res.status(400).json({ error: 'Configuração global incompleta: Pixel e Página são obrigatórios' });
+  // Pixel e Página são obrigatórios apenas para objetivos que exigem (Sales, Leads, Traffic)
+  // Awareness e Engagement podem funcionar sem pixel
+  const objective = normalizeObjective(config.objective || 'OUTCOME_SALES');
+  const compat = OBJECTIVE_COMPAT[objective] || OBJECTIVE_COMPAT.OUTCOME_SALES;
+  if (compat.requires_pixel && !pixelId) {
+    return res.status(400).json({ error: `Pixel é obrigatório para o objetivo ${objective}` });
+  }
+  if (!pageId) {
+    return res.status(400).json({ error: 'Página do Facebook é obrigatória para criar anúncios' });
   }
 
   const rawObjective = config.objective || 'OUTCOME_SALES';
@@ -442,60 +603,10 @@ app.post('/api/campaigns/create', async (req, res) => {
         console.log(`✅ Campanha: ${campaignData.id}`);
 
         // ===== 2. AD SET =====
-        // Estrutura CANÔNICA API v21.0 ODAX para OUTCOME_SALES:
-        // Campos OBRIGATÓRIOS: destination_type, optimization_goal, billing_event, promoted_object, targeting
-        // NÃO usar fallback — se falhar, o erro completo é repassado ao usuário para diagnóstico.
-        const adSetBody = {
-          name: adsetName,
-          campaign_id: campaignData.id,
-          status: 'PAUSED',
-          destination_type: 'WEBSITE',
-          optimization_goal: 'OFFSITE_CONVERSIONS',
-          billing_event: 'IMPRESSIONS',
-          promoted_object: {
-            pixel_id: pixelId,
-            custom_event_type: conversionEvent
-          },
-          targeting: {
-            geo_locations: { countries: ['BR'] },
-            age_min: config.age_min || 18,
-            age_max: config.age_max || 65
-          }
-        };
+        // Constrói AdSet dinamicamente baseado no objetivo (matriz ODAX)
+        const adSetBody = buildAdSetBody(objective, config, campaignData.id, pixelId, conversionEvent, adsetName);
 
-        // Orçamento/lance NO ADSET apenas se ABO (CBO = orçamento na campanha)
-        if (config.budget_type === 'ABO' && config.daily_budget) {
-          adSetBody.daily_budget = Math.round(config.daily_budget * 100);
-        }
-        // bid_strategy: estratégias com cap EXIGEM bid_amount > 0
-        // Se bid_amount for 0 ou ausente, NUNCA envia essas estratégias (usa padrão da Meta)
-        // Isso vale tanto para ABO quanto CBO — a regra é universal
-        if (config.bid_strategy) {
-          const needsBidAmount = ['LOWEST_COST_WITH_BID_CAP', 'BID_CAP', 'TARGET_COST', 'COST_CAP'].includes(config.bid_strategy);
-          if (needsBidAmount && config.bid_amount > 0) {
-            adSetBody.bid_strategy = config.bid_strategy;
-            adSetBody.bid_amount = Math.round(config.bid_amount * 100);
-          } else if (!needsBidAmount) {
-            // LOWEST_COST_WITHOUT_CAP não precisa de bid_amount
-            adSetBody.bid_strategy = config.bid_strategy;
-          }
-          // Se precisa de bid_amount mas é 0/ausente → NÃO envia bid_strategy
-          // A Meta usa LOWEST_COST_WITHOUT_CAP automaticamente
-        }
-        if (config.adset_spend_cap) {
-          adSetBody.spend_cap = Math.round(config.adset_spend_cap * 100);
-        }
-        if (config.start_time && config.start_time !== 'immediate') {
-          adSetBody.start_time = config.start_time;
-        }
-        if (config.end_time) {
-          adSetBody.end_time = config.end_time;
-        }
-        if (config.dynamic_creative) {
-          adSetBody.dynamic_creative_spec = { enabled: true };
-        }
-
-        console.log(`📋 AdSet body final:`, JSON.stringify(adSetBody, null, 2));
+        console.log(`📋 AdSet [${objective}]:`, JSON.stringify(adSetBody, null, 2));
         const adSetData = await graphPost(`act_${cleanId}/adsets`, accessToken, adSetBody);
         if (adSetData.error) {
           const errDetail = adSetData.error.error_user_msg || adSetData.error.error_user_title || adSetData.error.message;
