@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
+import cookieParser from 'cookie-parser';
 
 dotenv.config();
 
@@ -17,6 +18,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
+app.use(cookieParser());
 
 // --- Armazenamento em Memória (MVP) ---
 const sessions = {};
@@ -86,7 +88,7 @@ app.get('/api/auth/login', (req, res) => {
     client_id: process.env.META_APP_ID,
     redirect_uri: process.env.META_REDIRECT_URI,
     state: state,
-    scope: 'ads_management,ads_read,business_management,pages_manage_ads,pages_read_engagement',
+    scope: 'ads_management,ads_read,business_management,pages_read_engagement',
     response_type: 'code',
   });
 
