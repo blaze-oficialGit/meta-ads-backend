@@ -119,7 +119,7 @@ if (!META_APP_ID) return res.status(500).json({ error: 'META_APP_ID nao configur
 const state = uuidv4();
 res.cookie('meta_oauth_state', state, { httpOnly: true, secure: true, sameSite: 'none', maxAge: 600000 });
 res.cookie('meta_oauth_user', req.user.id, { httpOnly: true, secure: true, sameSite: 'none', maxAge: 600000 });
-const scopes = 'ads_management,ads_read,business_management,read_insights';
+const scopes = 'ads_management,ads_read,business_management';
 const authUrl = `https://www.facebook.com/${META_API_VERSION}/dialog/oauth?client_id=${META_APP_ID}&redirect_uri=${encodeURIComponent(META_REDIRECT_URI)}&state=${state}&scope=${scopes}&response_type=code`;
 res.json({ auth_url: authUrl });
 });
