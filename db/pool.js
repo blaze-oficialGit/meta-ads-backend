@@ -7,30 +7,43 @@ const { Pool } = pg;
 
 let pool = null;
 
-if (process.env.DATABASE_URL) {
-  pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-    max: 20,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 2000,
-  });
+try {
+  if (process.env.DATABASE_URL) {
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 5000,
+    });
 
-  pool.on('connect', () => {
-    console.log('✅ Nova conexão com o banco de dados estabelecida');
-  });
+    pool.on('connect', () => {
+      console.log('✅ Nova conexão com o banco de dados estabelecida');
+    });
 
-  pool.on('error', (err) => {
-    console.error('❌ Erro inesperado no pool de conexões:', err);
-  });
-} else {
-  console.warn('⚠️ DATABASE_URL não definido — modo sem banco de dados (apenas Meta Ads API)');
-  // Stub pool that returns empty results instead of crashing
-  pool = {
-    query: async () => ({ rows: [], rowCount: 0 }),
-    on: () => {},
-    end: async () => {}
-  };
+    pool.on('error', (err) => {
+      console.error('⚠️ Erro no pool de conexões (não fatal):', err.message);
+      // NÃO chamar process.exit - deixa o server rodar mesmo sem DB
+    });
+  } else {
+    console.warn('⚠️ DATABASE_URL não definido - rotas de auth JWT não funcionarão, mas Meta Ads OAuth funcionará');
+  }
+} catch (err) {
+  console.error('⚠️ Erro ao inicializar pool de DB (não fatal):', err.message);
+  pool = null;
 }
 
-export default pool;
+// Wrapper que retorna erro amigável se pool não existir
+const safePool = {
+  query: async (...args) => {
+    if (!pool) {
+      throw new Error('Banco de dados não configurado. Defina DATABASE_URL no Railway.');
+    }
+    return pool.query(...args);
+  },
+  end: async () => {
+    if (pool) return pool.end();
+  }
+};
+
+export default safePool;
