@@ -41,12 +41,6 @@ allowedHeaders: ['Content-Type', 'Authorization']
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
-
-// --- HEALTH CHECK (Railway needs this) ---
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: { error: 'Muitas requisicoes' }, standardHeaders: true, legacyHeaders: false });
 app.use('/api/', limiter);
 function authenticateToken(req, res, next) {
@@ -433,6 +427,188 @@ app.patch('/api/meta/adsets/:id', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Erro ao atualizar conjunto' });
   }
 });
+
+// POST create campaign + adset + creative + ad via Meta API
+app.post('/api/meta/campaigns', authenticateToken, async (req, res) => {
+  try {
+    const tokenData = metaTokens.get(req.user.id);
+    if (!tokenData) return res.status(401).json({ error: 'Meta nao conectado' });
+    
+    const {
+      account_id,
+      campaign_name,
+      objective,
+      daily_budget,
+      lifetime_budget,
+      adset_name,
+      conversion_event,
+      pixel_id,
+      targeting,
+      bid_strategy,
+      start_time,
+      end_time,
+      ad_name,
+      creative_name,
+      page_id,
+      image_url,
+      video_id,
+      headline,
+      body_text,
+      call_to_action,
+      destination_url,
+      status
+    } = req.body;
+    
+    if (!account_id || !campaign_name || !objective) {
+      return res.status(400).json({ error: 'account_id, campaign_name e objective sao obrigatorios' });
+    }
+    
+    const accessToken = tokenData.access_token;
+    const results = {};
+    
+    // Step 1: Create Campaign
+    const campaignBody = {
+      name: campaign_name,
+      objective: objective || 'OUTCOME_SALES',
+      status: status || 'PAUSED',
+      special_ad_categories: [],
+      buying_type: 'AUCTION'
+    };
+    
+    if (daily_budget) campaignBody.daily_budget = Math.round(parseFloat(daily_budget) * 100);
+    if (lifetime_budget) campaignBody.lifetime_budget = Math.round(parseFloat(lifetime_budget) * 100);
+    
+    console.log('[Campaign Create] Body:', JSON.stringify(campaignBody));
+    
+    const campaignResp = await fetch(`https://graph.facebook.com/${META_API_VERSION}/act_${account_id.replace('act_', '')}/campaigns`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...campaignBody, access_token: accessToken })
+    });
+    const campaignData = await campaignResp.json();
+    
+    if (campaignData.error) {
+      console.error('[Campaign Create] Error:', campaignData.error);
+      return res.status(400).json({ error: campaignData.error.message, code: campaignData.error.code, step: 'campaign' });
+    }
+    results.campaign = campaignData;
+    console.log('[Campaign Create] Success:', campaignData);
+    
+    // Step 2: Create AdSet (only if adset_name provided)
+    if (adset_name && campaignData.id) {
+      const adSetBody = {
+        name: adset_name,
+        campaign_id: campaignData.id,
+        status: 'PAUSED',
+        optimization_goal: 'OFFSITE_CONVERSIONS',
+        billing_event: 'IMPRESSIONS',
+        destination_type: 'WEBSITE',
+        promoted_object: {
+          pixel_id: pixel_id,
+          custom_event_type: conversion_event || 'PURCHASE'
+        },
+        targeting: targeting || {
+          age_min: 18,
+          age_max: 65,
+          geo_locations: { countries: ['BR'] }
+        }
+      };
+      
+      if (daily_budget) adSetBody.daily_budget = Math.round(parseFloat(daily_budget) * 100);
+      if (lifetime_budget) adSetBody.lifetime_budget = Math.round(parseFloat(lifetime_budget) * 100);
+      if (bid_strategy) adSetBody.bid_strategy = bid_strategy;
+      if (start_time) adSetBody.start_time = start_time;
+      if (end_time) adSetBody.end_time = end_time;
+      
+      console.log('[AdSet Create] Body:', JSON.stringify(adSetBody));
+      
+      const adSetResp = await fetch(`https://graph.facebook.com/${META_API_VERSION}/act_${account_id.replace('act_', '')}/adsets`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...adSetBody, access_token: accessToken })
+      });
+      const adSetData = await adSetResp.json();
+      
+      if (adSetData.error) {
+        console.error('[AdSet Create] Error:', adSetData.error);
+        results.adset_error = adSetData.error;
+      } else {
+        results.adset = adSetData;
+        console.log('[AdSet Create] Success:', adSetData);
+        
+        // Step 3: Create Ad Creative (only if creative info provided)
+        if (creative_name && adSetData.id) {
+          const creativeBody = {
+            name: creative_name,
+            object_story_spec: {
+              page_id: page_id,
+              link_data: {
+                message: body_text || '',
+                name: headline || '',
+                link: destination_url || '',
+                call_to_action: { type: call_to_action || 'LEARN_MORE' }
+              }
+            }
+          };
+          
+          if (image_url) {
+            creativeBody.object_story_spec.link_data.picture = image_url;
+          }
+          
+          console.log('[Creative Create] Body:', JSON.stringify(creativeBody));
+          
+          const creativeResp = await fetch(`https://graph.facebook.com/${META_API_VERSION}/act_${account_id.replace('act_', '')}/adcreatives`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...creativeBody, access_token: accessToken })
+          });
+          const creativeData = await creativeResp.json();
+          
+          if (creativeData.error) {
+            console.error('[Creative Create] Error:', creativeData.error);
+            results.creative_error = creativeData.error;
+          } else {
+            results.creative = creativeData;
+            console.log('[Creative Create] Success:', creativeData);
+            
+            // Step 4: Create Ad
+            if (ad_name && creativeData.id) {
+              const adBody = {
+                name: ad_name,
+                adset_id: adSetData.id,
+                creative: { creative_id: creativeData.id },
+                status: 'PAUSED'
+              };
+              
+              console.log('[Ad Create] Body:', JSON.stringify(adBody));
+              
+              const adResp = await fetch(`https://graph.facebook.com/${META_API_VERSION}/act_${account_id.replace('act_', '')}/ads`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ...adBody, access_token: accessToken })
+              });
+              const adData = await adResp.json();
+              
+              if (adData.error) {
+                console.error('[Ad Create] Error:', adData.error);
+                results.ad_error = adData.error;
+              } else {
+                results.ad = adData;
+                console.log('[Ad Create] Success:', adData);
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    res.json({ success: true, results });
+  } catch (error) {
+    console.error('Create campaign error:', error);
+    res.status(500).json({ error: 'Erro ao criar campanha: ' + error.message });
+  }
+});
+
 app.get('/api/health', (req, res) => { res.json({ status: 'ok', timestamp: new Date().toISOString(), version: '1.0.0', storage: 'memory', users_count: users.size, orders_count: orders.length, meta_connected: metaTokens.size }); });
 app.use((req, res) => res.status(404).json({ error: 'Endpoint nao encontrado' }));
 app.use((err, req, res, next) => { console.error('Error:', err); res.status(err.status || 500).json({ error: err.message || 'Erro interno' }); });
