@@ -473,9 +473,10 @@ function buildAdSetBody(objective, config, campaignId, pixelId, conversionEvent,
     body.daily_budget = Math.round(config.daily_budget * 100);
   }
 
-  // bid_strategy: NÃO ENVIAR NUNCA
-  // O CSV do anúncio funcionando mostra campo vazio = Meta usa default "Highest volume"
-  // Enviar LOWEST_COST_WITHOUT_CAP explicitamente causa erro "Valor do lance obrigatório"
+  // bid_strategy: ENVIAR EXPLICITAMENTE para evitar default incompatível
+  // LOWEST_COST_WITHOUT_CAP = "Maior volume" (não exige bid_amount)
+  // Sem isso, a Meta usa LOWEST_COST_WITH_BID_CAP que exige bid_amount e causa o erro
+  body.bid_strategy = 'LOWEST_COST_WITHOUT_CAP';
 
   // Opcionais
   if (config.adset_spend_cap) body.spend_cap = Math.round(config.adset_spend_cap * 100);
