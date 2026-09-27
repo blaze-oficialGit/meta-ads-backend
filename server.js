@@ -332,6 +332,101 @@ const platforms = [
 res.json({ integrations: platforms });
 });
 app.get('/tracking.js', (req, res) => { res.sendFile(join(__dirname, 'public', 'tracking.js')); });
+
+// PATCH campaign - update budget or status via Meta API
+app.patch('/api/meta/campaigns/:id', authenticateToken, async (req, res) => {
+  try {
+    const tokenData = metaTokens.get(req.user.id);
+    if (!tokenData) return res.status(401).json({ error: 'Meta nao conectado' });
+    const { daily_budget, lifetime_budget, status } = req.body;
+    const body = {};
+    if (daily_budget !== undefined) body.daily_budget = Math.round(parseFloat(daily_budget) * 100);
+    if (lifetime_budget !== undefined) body.lifetime_budget = Math.round(parseFloat(lifetime_budget) * 100);
+    if (status !== undefined) body.status = status;
+    if (Object.keys(body).length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+    const response = await fetch(`https://graph.facebook.com/${META_API_VERSION}/${req.params.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...body, access_token: tokenData.access_token })
+    });
+    const data = await response.json();
+    if (data.error) return res.status(400).json({ error: data.error.message, code: data.error.code });
+    res.json({ success: true, id: data.id || req.params.id, updated: body });
+  } catch (error) {
+    console.error('Patch campaign error:', error);
+    res.status(500).json({ error: 'Erro ao atualizar campanha' });
+  }
+});
+
+// GET ad accounts with details
+app.get('/api/meta/adaccounts', authenticateToken, async (req, res) => {
+  try {
+    const tokenData = metaTokens.get(req.user.id);
+    if (!tokenData) return res.status(401).json({ error: 'Meta nao conectado' });
+    const response = await fetch(`https://graph.facebook.com/${META_API_VERSION}/me/adaccounts?fields=id,name,account_status,balance,amount_spent,currency&limit=100&access_token=${tokenData.access_token}`);
+    const data = await response.json();
+    if (data.error) return res.status(400).json({ error: data.error.message });
+    res.json({ accounts: data.data || [] });
+  } catch (error) {
+    console.error('Get ad accounts error:', error);
+    res.status(500).json({ error: 'Erro ao buscar contas' });
+  }
+});
+
+// GET adsets for a campaign
+app.get('/api/meta/campaigns/:id/adsets', authenticateToken, async (req, res) => {
+  try {
+    const tokenData = metaTokens.get(req.user.id);
+    if (!tokenData) return res.status(401).json({ error: 'Meta nao conectado' });
+    const response = await fetch(`https://graph.facebook.com/${META_API_VERSION}/${req.params.id}/adsets?fields=id,name,status,daily_budget,lifetime_budget,budget_remaining,start_time,end_time,created_time,updated_time,targeting,optimization_goal,bid_strategy&limit=100&access_token=${tokenData.access_token}`);
+    const data = await response.json();
+    if (data.error) return res.status(400).json({ error: data.error.message });
+    res.json({ adsets: data.data || [] });
+  } catch (error) {
+    console.error('Get adsets error:', error);
+    res.status(500).json({ error: 'Erro ao buscar conjuntos' });
+  }
+});
+
+// GET ads for an adset
+app.get('/api/meta/adsets/:id/ads', authenticateToken, async (req, res) => {
+  try {
+    const tokenData = metaTokens.get(req.user.id);
+    if (!tokenData) return res.status(401).json({ error: 'Meta nao conectado' });
+    const response = await fetch(`https://graph.facebook.com/${META_API_VERSION}/${req.params.id}/ads?fields=id,name,status,created_time,updated_time,effective_status&limit=100&access_token=${tokenData.access_token}`);
+    const data = await response.json();
+    if (data.error) return res.status(400).json({ error: data.error.message });
+    res.json({ ads: data.data || [] });
+  } catch (error) {
+    console.error('Get ads error:', error);
+    res.status(500).json({ error: 'Erro ao buscar anuncios' });
+  }
+});
+
+// PATCH adset - update budget or status
+app.patch('/api/meta/adsets/:id', authenticateToken, async (req, res) => {
+  try {
+    const tokenData = metaTokens.get(req.user.id);
+    if (!tokenData) return res.status(401).json({ error: 'Meta nao conectado' });
+    const { daily_budget, lifetime_budget, status } = req.body;
+    const body = {};
+    if (daily_budget !== undefined) body.daily_budget = Math.round(parseFloat(daily_budget) * 100);
+    if (lifetime_budget !== undefined) body.lifetime_budget = Math.round(parseFloat(lifetime_budget) * 100);
+    if (status !== undefined) body.status = status;
+    if (Object.keys(body).length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+    const response = await fetch(`https://graph.facebook.com/${META_API_VERSION}/${req.params.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...body, access_token: tokenData.access_token })
+    });
+    const data = await response.json();
+    if (data.error) return res.status(400).json({ error: data.error.message, code: data.error.code });
+    res.json({ success: true, id: data.id || req.params.id, updated: body });
+  } catch (error) {
+    console.error('Patch adset error:', error);
+    res.status(500).json({ error: 'Erro ao atualizar conjunto' });
+  }
+});
 app.get('/api/health', (req, res) => { res.json({ status: 'ok', timestamp: new Date().toISOString(), version: '1.0.0', storage: 'memory', users_count: users.size, orders_count: orders.length, meta_connected: metaTokens.size }); });
 app.use((req, res) => res.status(404).json({ error: 'Endpoint nao encontrado' }));
 app.use((err, req, res, next) => { console.error('Error:', err); res.status(err.status || 500).json({ error: err.message || 'Erro interno' }); });
