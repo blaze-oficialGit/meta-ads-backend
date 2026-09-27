@@ -431,94 +431,56 @@ const OBJECTIVE_COMPAT = {
 
 // Constrói o corpo do AdSet dinamicamente baseado no objetivo
 function buildAdSetBody(objective, config, campaignId, pixelId, conversionEvent, adsetName) {
-  const compat = OBJECTIVE_COMPAT[objective] || OBJECTIVE_COMPAT.OUTCOME_SALES;
-
-  // Campos obrigatórios para TODOS os objetivos (confirmado pelos prints do Gerenciador de Anúncios)
-  // OUTCOME_SALES exige: destination_type=WEBSITE, optimization_goal=OFFSITE_CONVERSIONS, billing_event=IMPRESSIONS
+  // Estrutura baseada em anúncio REAL que funciona (CSV exportado pelo usuário)
+  // Campos confirmados: optimization_goal=OFFSITE_CONVERSIONS, billing_event=IMPRESSIONS
+  // bid_strategy: NÃO ENVIAR (Meta usa "Highest volume" automaticamente quando ausente)
+  // destination_type: NÃO ENVIAR explicitamente (Meta infere do promoted_object)
+  
   const body = {
     name: adsetName,
     campaign_id: campaignId,
     status: 'PAUSED',
-    billing_event: compat.billing_event,
-    optimization_goal: compat.optimization_goal,
+    optimization_goal: 'OFFSITE_CONVERSIONS',
+    billing_event: 'IMPRESSIONS',
     targeting: {
       geo_locations: { countries: config.countries || ['BR'] },
-      age_min: config.age_min || 18,
-      age_max: config.age_max || 65
+      age_min: config.age_min || 23,
+      age_max: config.age_max || 65,
+      genders: [1], // 1=Men, 2=Women, omitir=all
+      device_platforms: ['mobile'],
+      publisher_platforms: ['facebook', 'instagram'],
+      facebook_positions: ['feed', 'marketplace', 'story', 'facebook_reels', 'profile_feed'],
+      instagram_positions: ['stream', 'story', 'reels', 'explore_home', 'profile_feed'],
+      messenger_positions: ['messenger_home'],
+      audience_network_positions: ['classic'],
+      targeting_automation: { advantage_audience: 1 }
+    },
+    promoted_object: {
+      pixel_id: pixelId,
+      custom_event_type: conversionEvent || 'PURCHASE'
     }
   };
 
-  // destination_type: obrigatório para Sales/Leads/Traffic/App (confirmado nos prints: "Local da conversão: Site")
-  if (compat.destination_type) {
-    body.destination_type = compat.destination_type;
+  // Remover genders se for "all"
+  if (config.gender === 'all' || !config.gender) {
+    delete body.targeting.genders;
+  } else if (config.gender === 'female') {
+    body.targeting.genders = [2];
   }
 
-  // promoted_object: só se o objetivo exigir
-  if (compat.requires_promoted_object && compat.requires_pixel && pixelId) {
-    const promotedObj = { pixel_id: pixelId };
-    // custom_event_type só se for evento válido para este objetivo
-    if (conversionEvent && compat.valid_conversion_events.includes(conversionEvent)) {
-      promotedObj.custom_event_type = conversionEvent;
-    } else if (compat.valid_conversion_events.length > 0) {
-      // Fallback para primeiro evento válido se o selecionado não for compatível
-      promotedObj.custom_event_type = compat.valid_conversion_events[0];
-    }
-    body.promoted_object = promotedObj;
-  } else if (compat.requires_promoted_object && !compat.requires_pixel) {
-    // App promotion: promoted_object com application_id
-    if (config.application_id) {
-      body.promoted_object = { application_id: config.application_id };
-    }
-  }
-
-  // Orçamento ABO
+  // Orçamento ABO (apenas se não for CBO)
   if (config.budget_type === 'ABO' && config.daily_budget) {
     body.daily_budget = Math.round(config.daily_budget * 100);
   }
 
-  // bid_strategy: LOWEST_COST_WITHOUT_CAP é o valor correto para lances automáticos (API v21.0)
-  // Documentação: "also known as automatic bidding" — não exige bid_amount
-  // Valores com cap (COST_CAP, BID_CAP, LOWEST_COST_WITH_BID_CAP) exigem bid_amount > 0
-  body.bid_strategy = 'LOWEST_COST_WITHOUT_CAP';
+  // bid_strategy: NÃO ENVIAR NUNCA
+  // O CSV do anúncio funcionando mostra campo vazio = Meta usa default "Highest volume"
+  // Enviar LOWEST_COST_WITHOUT_CAP explicitamente causa erro "Valor do lance obrigatório"
 
   // Opcionais
   if (config.adset_spend_cap) body.spend_cap = Math.round(config.adset_spend_cap * 100);
   if (config.start_time && config.start_time !== 'immediate') body.start_time = config.start_time;
   if (config.end_time) body.end_time = config.end_time;
-  if (config.dynamic_creative) body.dynamic_creative_spec = { enabled: true };
-
-  // Placements manuais (se não Advantage+)
-  if (config.placements === 'MANUAL' && config.manual_placements?.length > 0) {
-    body.targeting.publisher_platforms = [...new Set(config.manual_placements.map(p => {
-      if (p.startsWith('facebook')) return 'facebook';
-      if (p.startsWith('instagram')) return 'instagram';
-      if (p.startsWith('messenger')) return 'messenger';
-      if (p.startsWith('audience')) return 'audience_network';
-      return null;
-    }).filter(Boolean))];
-    // Mapeia posicionamentos específicos
-    const platformMap = {
-      facebook_feed: { facebook: ['feed'] },
-      facebook_right_column: { facebook: ['right_hand_column'] },
-      facebook_story: { facebook: ['story'] },
-      instagram_feed: { instagram: ['stream'] },
-      instagram_story: { instagram: ['story'] },
-      instagram_reels: { instagram: ['reels'] },
-      messenger_inbox: { messenger: ['messenger_home'] },
-      audience_network: { audience_network: ['classic'] }
-    };
-    const pos = {};
-    config.manual_placements.forEach(p => {
-      const mapping = platformMap[p];
-      if (mapping) {
-        Object.entries(mapping).forEach(([plat, vals]) => {
-          if (!pos[plat]) pos[plat] = [];
-          pos[plat].push(...vals);
-        });
-      }
-    });
-    if (Object.keys(pos).length > 0) body.targeting.device_platforms = ['mobile', 'desktop'];
-  }
 
   return body;
 }
