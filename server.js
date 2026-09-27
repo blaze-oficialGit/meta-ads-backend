@@ -40,10 +40,23 @@ app.set('trust proxy', 1);
 
 // CORS - Allow all necessary methods including PATCH for updates
 app.use(cors({
-  origin: process.env.FRONTEND_URL || '*',
+  origin: function(origin, callback) {
+    if (!origin) return callback(null, true);
+    const allowed = [
+      'https://meta-ads-frontend-one.vercel.app',
+      'http://localhost:5173',
+      'http://localhost:3000',
+      process.env.FRONTEND_URL
+    ].filter(Boolean);
+    if (allowed.includes(origin) || origin.endsWith('.vercel.app')) {
+      callback(null, true);
+    } else {
+      callback(null, true);
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Meta-Token']
 }));
 app.use(express.json());
 app.use(cookieParser());
