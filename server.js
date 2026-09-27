@@ -79,7 +79,7 @@ app.use('/api/orders', ordersRoutes);
 
 // Serve tracking script
 app.get('/tracking.js', (req, res) => {
-  res.sendFile(join(__dirname, '../public/tracking.js'));
+  res.sendFile(join(__dirname, './public/tracking.js'));
 });
 
 // Health check
