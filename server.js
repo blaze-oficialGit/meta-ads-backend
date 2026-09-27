@@ -1,3 +1,4 @@
+// Blaze Ads Manager Backend v2.1 - Deployed 2026-09-27
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
