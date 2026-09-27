@@ -312,7 +312,7 @@ app.post('/api/ai/interpret', async (req, res) => {
         website_url: '', display_link: '', url_params: '',
         primary_text: '', headline: '', description: '', call_to_action: 'LEARN_MORE',
         campaign_name: '', adset_name: '', ad_name: '',
-        placements: 'AUTOMATIC', bid_strategy: 'LOWEST_COST_WITHOUT_CAP',
+        placements: 'AUTOMATIC',
         start_time: 'immediate', end_time: '',
         languages: [], dynamic_creative: false,
         creative_assignments: {}
