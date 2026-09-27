@@ -476,10 +476,10 @@ function buildAdSetBody(objective, config, campaignId, pixelId, conversionEvent,
     body.daily_budget = Math.round(config.daily_budget * 100);
   }
 
-  // bid_strategy: NÃO ENVIAR NUNCA no AdSet para evitar "Valor do lance obrigatório"
-  // A Meta usa Lowest Cost automaticamente quando nenhum bid_strategy é enviado.
-  // Se precisar de COST_CAP/BID_CAP no futuro, adicionar apenas após validar que bid_amount > 0
-  // E que a conta aceita esses valores para o objetivo escolhido.
+  // bid_strategy: LOWEST_COST_WITHOUT_CAP é o valor correto para lances automáticos (API v21.0)
+  // Documentação: "also known as automatic bidding" — não exige bid_amount
+  // Valores com cap (COST_CAP, BID_CAP, LOWEST_COST_WITH_BID_CAP) exigem bid_amount > 0
+  body.bid_strategy = 'LOWEST_COST_WITHOUT_CAP';
 
   // Opcionais
   if (config.adset_spend_cap) body.spend_cap = Math.round(config.adset_spend_cap * 100);
