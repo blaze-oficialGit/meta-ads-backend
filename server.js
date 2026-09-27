@@ -4,8 +4,33 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
 import cookieParser from 'cookie-parser';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import pg from 'pg';
+const { Pool } = pg;
 
 dotenv.config();
+
+const JWT_SECRET = process.env.JWT_SECRET || 'blaze-ads-secret-key-change-in-production';
+let pool = null;
+if (process.env.DATABASE_URL) {
+  pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+  // Initialize users table
+  pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      email VARCHAR(255) UNIQUE NOT NULL,
+      password_hash VARCHAR(255) NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `).then(() => console.log('✅ Users table ready')).catch(err => console.error('❌ DB init:', err.message));
+} else {
+  console.log('⚠️ No DATABASE_URL - user auth will use in-memory storage');
+}
+
+// In-memory user fallback (when no DB)
+const memUsers = {};
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -30,6 +55,86 @@ app.get('/health', (req, res) => {
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// --- USER AUTH MIDDLEWARE ---
+function authenticateToken(req, res, next) {
+  const auth = req.headers.authorization || '';
+  const token = auth.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'No token' });
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
+
+// --- POST /api/auth/register ---
+app.post('/api/auth/register', async (req, res) => {
+  const { name, email, password } = req.body;
+  if (!name || !email || !password) return res.status(400).json({ error: 'Nome, email e senha obrigatórios' });
+  try {
+    if (pool) {
+      const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+      if (existing.rows.length > 0) return res.status(409).json({ error: 'Email já cadastrado' });
+      const hash = await bcrypt.hash(password, 10);
+      const result = await pool.query('INSERT INTO users (name, email, password_hash) VALUES ($1,$2,$3) RETURNING id,name,email', [name, email, hash]);
+      const user = result.rows[0];
+      const tok = jwt.sign({ id: user.id, email: user.email, name: user.name }, JWT_SECRET, { expiresIn: '7d' });
+      console.log(`✅ Registrado: ${email}`);
+      return res.json({ ok: true, token: tok, user: { id: user.id, name: user.name, email: user.email } });
+    } else {
+      if (memUsers[email]) return res.status(409).json({ error: 'Email já cadastrado' });
+      const hash = await bcrypt.hash(password, 10);
+      const id = Object.keys(memUsers).length + 1;
+      memUsers[email] = { id, name, email, password_hash: hash };
+      const tok = jwt.sign({ id, email, name }, JWT_SECRET, { expiresIn: '7d' });
+      console.log(`✅ Registrado (mem): ${email}`);
+      return res.json({ ok: true, token: tok, user: { id, name, email } });
+    }
+  } catch (err) { console.error('❌ Register:', err); res.status(500).json({ error: 'Erro ao criar conta' }); }
+});
+
+// --- POST /api/auth/login (email/password) ---
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'Email e senha obrigatórios' });
+  try {
+    if (pool) {
+      const result = await pool.query('SELECT id,name,email,password_hash FROM users WHERE email=$1', [email]);
+      if (!result.rows.length) return res.status(401).json({ error: 'Email ou senha incorretos' });
+      const user = result.rows[0];
+      const valid = await bcrypt.compare(password, user.password_hash);
+      if (!valid) return res.status(401).json({ error: 'Email ou senha incorretos' });
+      const tok = jwt.sign({ id: user.id, email: user.email, name: user.name }, JWT_SECRET, { expiresIn: '7d' });
+      console.log(`✅ Login: ${email}`);
+      return res.json({ ok: true, token: tok, user: { id: user.id, name: user.name, email: user.email } });
+    } else {
+      const user = memUsers[email];
+      if (!user) return res.status(401).json({ error: 'Email ou senha incorretos' });
+      const valid = await bcrypt.compare(password, user.password_hash);
+      if (!valid) return res.status(401).json({ error: 'Email ou senha incorretos' });
+      const tok = jwt.sign({ id: user.id, email: user.email, name: user.name }, JWT_SECRET, { expiresIn: '7d' });
+      console.log(`✅ Login (mem): ${email}`);
+      return res.json({ ok: true, token: tok, user: { id: user.id, name: user.name, email: user.email } });
+    }
+  } catch (err) { console.error('❌ Login:', err); res.status(500).json({ error: 'Erro ao fazer login' }); }
+});
+
+// --- GET /api/auth/me ---
+app.get('/api/auth/me', authenticateToken, async (req, res) => {
+  try {
+    if (pool) {
+      const result = await pool.query('SELECT id,name,email FROM users WHERE id=$1', [req.user.id]);
+      if (!result.rows.length) return res.status(404).json({ error: 'Usuário não encontrado' });
+      return res.json({ ok: true, user: result.rows[0] });
+    } else {
+      const user = Object.values(memUsers).find(u => u.id === req.user.id);
+      if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
+      return res.json({ ok: true, user: { id: user.id, name: user.name, email: user.email } });
+    }
+  } catch (err) { res.status(500).json({ error: 'Erro ao buscar usuário' }); }
 });
 
 // --- Armazenamento em Memória (MVP) ---
