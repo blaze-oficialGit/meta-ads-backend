@@ -114,23 +114,37 @@ user.password_hash = await bcrypt.hash(newPassword, 10);
 users.set(req.user.id, user);
 res.json({ message: 'Senha alterada' });
 });
+// In-memory OAuth state store (survives within a single Railway instance)
+const oauthStates = new Map();
+function cleanupExpiredStates() {
+const now = Date.now();
+for (const [state, data] of oauthStates) {
+if (now - data.createdAt > 600000) oauthStates.delete(state);
+}
+}
+setInterval(cleanupExpiredStates, 60000);
 app.get('/api/auth/meta', authenticateToken, (req, res) => {
 if (!META_APP_ID) return res.status(500).json({ error: 'META_APP_ID nao configurado' });
 const state = uuidv4();
-res.cookie('meta_oauth_state', state, { httpOnly: true, secure: true, sameSite: 'none', maxAge: 600000 });
-res.cookie('meta_oauth_user', req.user.id, { httpOnly: true, secure: true, sameSite: 'none', maxAge: 600000 });
+oauthStates.set(state, { userId: req.user.id, createdAt: Date.now() });
 const scopes = 'ads_management,ads_read,business_management';
 const authUrl = `https://www.facebook.com/${META_API_VERSION}/dialog/oauth?client_id=${META_APP_ID}&redirect_uri=${encodeURIComponent(META_REDIRECT_URI)}&state=${state}&scope=${scopes}&response_type=code`;
+console.log(`[OAuth] State created: ${state.substring(0,8)}... for user ${req.user.id}`);
 res.json({ auth_url: authUrl });
 });
 app.get('/api/auth/meta/callback', async (req, res) => {
 try {
 const { code, state, error } = req.query;
-if (error) return res.redirect(`${process.env.FRONTEND_URL || 'https://meta-ads-frontend-one.vercel.app'}?error=${encodeURIComponent(error)}`);
-const savedState = req.cookies.meta_oauth_state;
-const userId = req.cookies.meta_oauth_user;
-if (!state || state !== savedState) return res.redirect(`${process.env.FRONTEND_URL || 'https://meta-ads-frontend-one.vercel.app'}?error=invalid_state`);
-if (!code) return res.redirect(`${process.env.FRONTEND_URL || 'https://meta-ads-frontend-one.vercel.app'}?error=no_code`);
+const frontendUrl = process.env.FRONTEND_URL || 'https://meta-ads-frontend-one.vercel.app';
+if (error) return res.redirect(`${frontendUrl}?error=${encodeURIComponent(error)}`);
+const stateData = oauthStates.get(state);
+if (!state || !stateData) {
+console.error(`[OAuth] Invalid state: ${state ? state.substring(0,8) : 'null'}... not found in memory (${oauthStates.size} states stored)`);
+return res.redirect(`${frontendUrl}?error=invalid_state`);
+}
+const userId = stateData.userId;
+oauthStates.delete(state);
+if (!code) return res.redirect(`${frontendUrl}?error=no_code`);
 const tokenResponse = await fetch(`https://graph.facebook.com/${META_API_VERSION}/oauth/access_token?client_id=${META_APP_ID}&client_secret=${META_APP_SECRET}&redirect_uri=${encodeURIComponent(META_REDIRECT_URI)}&code=${code}`);
 const tokenData = await tokenResponse.json();
 if (!tokenData.access_token) return res.redirect(`${process.env.FRONTEND_URL || 'https://meta-ads-frontend-one.vercel.app'}?error=token_failed`);
@@ -143,8 +157,8 @@ const meResponse = await fetch(`https://graph.facebook.com/${META_API_VERSION}/m
 const meData = await meResponse.json();
 const user = users.get(userId);
 if (user) { user.meta_user_id = meData.id; user.meta_name = meData.name; users.set(userId, user); }
-res.clearCookie('meta_oauth_state');
-res.clearCookie('meta_oauth_user');
+// state already deleted from memory
+// user retrieved from state data
 res.redirect(`${process.env.FRONTEND_URL || 'https://meta-ads-frontend-one.vercel.app'}?meta_connected=true`);
 } catch (error) { console.error('Meta callback error:', error); res.redirect(`${process.env.FRONTEND_URL || 'https://meta-ads-frontend-one.vercel.app'}?error=callback_failed`); }
 });
