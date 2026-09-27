@@ -1,355 +1,664 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import helmet from 'helmet';
+import crypto from 'crypto';
 import cookieParser from 'cookie-parser';
-import rateLimit from 'express-rate-limit';
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-import { v4 as uuidv4 } from 'uuid';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+
 dotenv.config();
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+
 const app = express();
 const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || 'utm-tracker-secret-key-2026-super-safe';
-const META_APP_ID = process.env.META_APP_ID || '';
-const META_APP_SECRET = process.env.META_APP_SECRET || '';
-const META_REDIRECT_URI = 'https://meta-ads-backend-production-2ce8.up.railway.app/api/auth/meta/callback'; // HARDCODED - ignore env var to fix OAuth mismatch
 const META_API_VERSION = process.env.META_API_VERSION || 'v21.0';
-const users = new Map();
-const workspaces = new Map();
-const trackingLinks = new Map();
-const visitors = new Map();
-const sessions = new Map();
-const events = [];
-const orders = [];
-const leads = [];
-const webhookLogs = [];
-const metaTokens = new Map();
-const metaBusinesses = new Map();
-const metaCampaigns = new Map();
-app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
-app.use(cors({
-origin: process.env.FRONTEND_URL || 'https://meta-ads-frontend-one.vercel.app',
-credentials: true,
-methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
-allowedHeaders: ['Content-Type', 'Authorization']
-}));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-app.use(cookieParser());
-const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: { error: 'Muitas requisicoes' }, standardHeaders: true, legacyHeaders: false });
-app.use('/api/', limiter);
-function authenticateToken(req, res, next) {
-const authHeader = req.headers['authorization'];
-const token = authHeader && authHeader.split(' ')[1];
-if (!token) return res.status(401).json({ error: 'Token necessario' });
-try {
-const decoded = jwt.verify(token, JWT_SECRET);
-const user = users.get(decoded.userId);
-if (!user) return res.status(401).json({ error: 'Usuario nao encontrado' });
-req.user = user;
-next();
-} catch (error) { return res.status(401).json({ error: 'Token invalido' }); }
-}
-function getWorkspace(userId) {
-for (const [id, ws] of workspaces) { if (ws.user_id === userId) return { id, ...ws }; }
-const wsId = uuidv4();
-const ws = { user_id: userId, name: 'Default Workspace', created_at: new Date().toISOString() };
-workspaces.set(wsId, ws);
-return { id: wsId, ...ws };
-}
-app.post('/api/auth/register', async (req, res) => {
-try {
-const { email, password, name } = req.body;
-if (!email || !password) return res.status(400).json({ error: 'Email e senha obrigatorios' });
-const emailLower = email.toLowerCase();
-for (const [id, u] of users) { if (u.email === emailLower) return res.status(409).json({ error: 'Email ja cadastrado' }); }
-const passwordHash = await bcrypt.hash(password, 10);
-const userId = uuidv4();
-const user = { id: userId, email: emailLower, password_hash: passwordHash, name: name || null, plan: 'free', created_at: new Date().toISOString() };
-users.set(userId, user);
-const wsId = uuidv4();
-workspaces.set(wsId, { user_id: userId, name: 'Default Workspace', created_at: new Date().toISOString() });
-const token = jwt.sign({ userId, email: emailLower }, JWT_SECRET, { expiresIn: '7d' });
-res.status(201).json({ message: 'Usuario criado', user: { id: userId, email: emailLower, name: user.name, plan: 'free' }, token });
-} catch (error) { console.error('Register error:', error); res.status(500).json({ error: 'Erro ao criar usuario' }); }
-});
-app.post('/api/auth/login', async (req, res) => {
-try {
-const { email, password } = req.body;
-if (!email || !password) return res.status(400).json({ error: 'Email e senha obrigatorios' });
-const emailLower = email.toLowerCase();
-let foundUser = null;
-for (const [id, u] of users) { if (u.email === emailLower) { foundUser = { id, ...u }; break; } }
-if (!foundUser) return res.status(401).json({ error: 'Email ou senha incorretos' });
-const validPassword = await bcrypt.compare(password, foundUser.password_hash);
-if (!validPassword) return res.status(401).json({ error: 'Email ou senha incorretos' });
-const token = jwt.sign({ userId: foundUser.id, email: emailLower }, JWT_SECRET, { expiresIn: '7d' });
-res.json({ message: 'Login realizado', user: { id: foundUser.id, email: foundUser.email, name: foundUser.name, plan: foundUser.plan }, token });
-} catch (error) { console.error('Login error:', error); res.status(500).json({ error: 'Erro ao fazer login' }); }
-});
-app.get('/api/auth/me', authenticateToken, (req, res) => {
-res.json({ user: { id: req.user.id, email: req.user.email, name: req.user.name, plan: req.user.plan } });
-});
-app.put('/api/auth/me', authenticateToken, (req, res) => {
-const { name, email } = req.body;
-const user = users.get(req.user.id);
-if (name !== undefined) user.name = name;
-if (email !== undefined) user.email = email.toLowerCase();
-user.updated_at = new Date().toISOString();
-users.set(req.user.id, user);
-res.json({ message: 'Usuario atualizado', user: { id: user.id, email: user.email, name: user.name, plan: user.plan } });
-});
-app.put('/api/auth/change-password', authenticateToken, async (req, res) => {
-const { currentPassword, newPassword } = req.body;
-if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Senhas obrigatorias' });
-const user = users.get(req.user.id);
-const valid = await bcrypt.compare(currentPassword, user.password_hash);
-if (!valid) return res.status(401).json({ error: 'Senha atual incorreta' });
-user.password_hash = await bcrypt.hash(newPassword, 10);
-users.set(req.user.id, user);
-res.json({ message: 'Senha alterada' });
-});
-// In-memory OAuth state store (survives within a single Railway instance)
-const oauthStates = new Map();
-function cleanupExpiredStates() {
-const now = Date.now();
-for (const [state, data] of oauthStates) {
-if (now - data.createdAt > 600000) oauthStates.delete(state);
-}
-}
-setInterval(cleanupExpiredStates, 60000);
-app.get('/api/auth/meta', authenticateToken, (req, res) => {
-if (!META_APP_ID) return res.status(500).json({ error: 'META_APP_ID nao configurado' });
-const state = uuidv4();
-oauthStates.set(state, { userId: req.user.id, createdAt: Date.now() });
-const scopes = 'ads_management,ads_read,business_management';
-const authUrl = `https://www.facebook.com/${META_API_VERSION}/dialog/oauth?client_id=${META_APP_ID}&redirect_uri=${encodeURIComponent(META_REDIRECT_URI)}&state=${state}&scope=${scopes}&response_type=code`;
-console.log(`[OAuth] State created: ${state.substring(0,8)}... for user ${req.user.id}`);
-res.json({ auth_url: authUrl });
-});
-app.get('/api/auth/meta/callback', async (req, res) => {
-try {
-const { code, state, error } = req.query;
-const frontendUrl = process.env.FRONTEND_URL || 'https://meta-ads-frontend-one.vercel.app';
-if (error) return res.redirect(`${frontendUrl}?error=${encodeURIComponent(error)}`);
-const stateData = oauthStates.get(state);
-if (!state || !stateData) {
-console.error(`[OAuth] Invalid state: ${state ? state.substring(0,8) : 'null'}... not found in memory (${oauthStates.size} states stored)`);
-return res.redirect(`${frontendUrl}?error=invalid_state`);
-}
-const userId = stateData.userId;
-oauthStates.delete(state);
-if (!code) return res.redirect(`${frontendUrl}?error=no_code`);
-const tokenResponse = await fetch(`https://graph.facebook.com/${META_API_VERSION}/oauth/access_token?client_id=${META_APP_ID}&client_secret=${META_APP_SECRET}&redirect_uri=${encodeURIComponent(META_REDIRECT_URI)}&code=${code}`);
-const tokenData = await tokenResponse.json();
-if (!tokenData.access_token) return res.redirect(`${process.env.FRONTEND_URL || 'https://meta-ads-frontend-one.vercel.app'}?error=token_failed`);
-const longLivedResponse = await fetch(`https://graph.facebook.com/${META_API_VERSION}/oauth/access_token?grant_type=fb_exchange_token&client_id=${META_APP_ID}&client_secret=${META_APP_SECRET}&fb_exchange_token=${tokenData.access_token}`);
-const longLivedData = await longLivedResponse.json();
-const accessToken = longLivedData.access_token || tokenData.access_token;
-const expiresAt = longLivedData.expires_in ? new Date(Date.now() + longLivedData.expires_in * 1000).toISOString() : null;
-metaTokens.set(userId, { access_token: accessToken, expires_at: expiresAt, connected_at: new Date().toISOString() });
-const meResponse = await fetch(`https://graph.facebook.com/${META_API_VERSION}/me?fields=id,name&access_token=${accessToken}`);
-const meData = await meResponse.json();
-const user = users.get(userId);
-if (user) { user.meta_user_id = meData.id; user.meta_name = meData.name; users.set(userId, user); }
-// state already deleted from memory
-// user retrieved from state data
-res.redirect(`${process.env.FRONTEND_URL || 'https://meta-ads-frontend-one.vercel.app'}?meta_connected=true`);
-} catch (error) { console.error('Meta callback error:', error); res.redirect(`${process.env.FRONTEND_URL || 'https://meta-ads-frontend-one.vercel.app'}?error=callback_failed`); }
-});
-app.get('/api/auth/meta/status', authenticateToken, (req, res) => {
-const tokenData = metaTokens.get(req.user.id);
-if (!tokenData) return res.json({ connected: false, businesses: [] });
-const businesses = Array.from(metaBusinesses.values()).filter(b => b.user_id === req.user.id);
-res.json({ connected: true, expires_at: tokenData.expires_at, businesses });
-});
-app.delete('/api/auth/meta', authenticateToken, (req, res) => {
-metaTokens.delete(req.user.id);
-for (const [id, b] of metaBusinesses) { if (b.user_id === req.user.id) metaBusinesses.delete(id); }
-for (const [id, c] of metaCampaigns) { if (c.user_id === req.user.id) metaCampaigns.delete(id); }
-res.json({ message: 'Meta desconectado' });
-});
-app.get('/api/meta/businesses', authenticateToken, async (req, res) => {
-try {
-const tokenData = metaTokens.get(req.user.id);
-if (!tokenData) return res.status(401).json({ error: 'Meta nao conectado' });
-const response = await fetch(`https://graph.facebook.com/${META_API_VERSION}/me/businesses?fields=id,name,verification_status&access_token=${tokenData.access_token}`);
-const data = await response.json();
-if (data.error) return res.status(400).json({ error: data.error.message });
-const businesses = (data.data || []).map(b => ({ id: b.id, name: b.name, verification_status: b.verification_status, user_id: req.user.id }));
-businesses.forEach(b => metaBusinesses.set(b.id, b));
-res.json({ businesses });
-} catch (error) { console.error('Get businesses error:', error); res.status(500).json({ error: 'Erro ao buscar businesses' }); }
-});
-app.get('/api/meta/campaigns', authenticateToken, async (req, res) => {
-try {
-const tokenData = metaTokens.get(req.user.id);
-if (!tokenData) return res.status(401).json({ error: 'Meta nao conectado' });
-const { business_id, status, limit = 100 } = req.query;
-let allCampaigns = [];
-if (business_id) {
-const accountsResponse = await fetch(`https://graph.facebook.com/${META_API_VERSION}/${business_id}/owned_ad_accounts?fields=id,name,account_status&access_token=${tokenData.access_token}`);
-const accountsData = await accountsResponse.json();
-if (accountsData.error) return res.status(400).json({ error: accountsData.error.message });
-const accounts = accountsData.data || [];
-for (const account of accounts) {
-let url = `https://graph.facebook.com/${META_API_VERSION}/${account.id}/campaigns?fields=id,name,status,objective,budget_remaining,daily_budget,lifetime_budget,start_time,stop_time,created_time,updated_time&limit=${limit}&access_token=${tokenData.access_token}`;
-if (status) url += `&effective_status=[\"${status}\"]`;
-const campResponse = await fetch(url);
-const campData = await campResponse.json();
-if (campData.data) {
-allCampaigns.push(...campData.data.map(c => ({ ...c, account_id: account.id, account_name: account.name, business_id })));
-}
-}
-} else {
-const meResponse = await fetch(`https://graph.facebook.com/${META_API_VERSION}/me/adaccounts?fields=id,name,account_status&access_token=${tokenData.access_token}`);
-const meData = await meResponse.json();
-if (meData.error) return res.status(400).json({ error: meData.error.message });
-const accounts = meData.data || [];
-for (const account of accounts) {
-let url = `https://graph.facebook.com/${META_API_VERSION}/${account.id}/campaigns?fields=id,name,status,objective,budget_remaining,daily_budget,lifetime_budget,start_time,stop_time,created_time,updated_time&limit=${limit}&access_token=${tokenData.access_token}`;
-if (status) url += `&effective_status=[\"${status}\"]`;
-const campResponse = await fetch(url);
-const campData = await campResponse.json();
-if (campData.data) {
-allCampaigns.push(...campData.data.map(c => ({ ...c, account_id: account.id, account_name: account.name })));
-}
-}
-}
-allCampaigns.forEach(c => metaCampaigns.set(c.id, { ...c, user_id: req.user.id }));
-res.json({ campaigns: allCampaigns, total: allCampaigns.length });
-} catch (error) { console.error('Get campaigns error:', error); res.status(500).json({ error: 'Erro ao buscar campanhas' }); }
-});
-app.get('/api/meta/campaigns/:id', authenticateToken, async (req, res) => {
-try {
-const tokenData = metaTokens.get(req.user.id);
-if (!tokenData) return res.status(401).json({ error: 'Meta nao conectado' });
-const response = await fetch(`https://graph.facebook.com/${META_API_VERSION}/${req.params.id}?fields=id,name,status,objective,budget_remaining,daily_budget,lifetime_budget,start_time,stop_time,created_time,updated_time&access_token=${tokenData.access_token}`);
-const data = await response.json();
-if (data.error) return res.status(400).json({ error: data.error.message });
-res.json({ campaign: data });
-} catch (error) { console.error('Get campaign error:', error); res.status(500).json({ error: 'Erro ao buscar campanha' }); }
-});
-app.get('/api/stats/dashboard', authenticateToken, (req, res) => {
-const ws = getWorkspace(req.user.id);
-const wsOrders = orders.filter(o => o.workspace_id === ws.id);
-const wsLeads = leads.filter(l => l.workspace_id === ws.id);
-const wsEvents = events.filter(e => e.workspace_id === ws.id);
-const wsClicks = wsEvents.filter(e => e.event_type === 'click' || e.event_type === 'page_view');
-const approvedOrders = wsOrders.filter(o => o.status === 'approved');
-const totalRevenue = approvedOrders.reduce((sum, o) => sum + parseFloat(o.amount || 0), 0);
-const salesCount = approvedOrders.length;
-const clicksCount = wsClicks.length;
-const leadsCount = wsLeads.length;
-const avgTicket = salesCount > 0 ? totalRevenue / salesCount : 0;
-const conversionRate = clicksCount > 0 ? (salesCount / clicksCount) * 100 : 0;
-const roas = totalRevenue > 0 ? totalRevenue / 100 : 0;
-const now = new Date();
-const days7 = [];
-for (let i = 6; i >= 0; i--) {
-const d = new Date(now); d.setDate(d.getDate() - i);
-const dateStr = d.toISOString().split('T')[0];
-const dayOrders = approvedOrders.filter(o => o.created_at && o.created_at.startsWith(dateStr));
-days7.push({ date: dateStr, revenue: dayOrders.reduce((s, o) => s + parseFloat(o.amount || 0), 0), orders_count: dayOrders.length });
-}
-const recentSales = approvedOrders.sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 5);
-res.json({ summary: { investment: 0, revenue: totalRevenue, sales: salesCount, leads: leadsCount, clicks: clicksCount, conversion_rate: parseFloat(conversionRate.toFixed(2)), cpa: 0, cpl: 0, roas: parseFloat(roas.toFixed(2)), avg_ticket: parseFloat(avgTicket.toFixed(2)), profit: totalRevenue }, time_series: { revenue: days7, clicks: days7.map(d => ({ date: d.date, clicks_count: Math.floor(Math.random() * 50) + 10 })) }, recent_sales: recentSales, period: '7d', is_demo: false });
-});
-app.post('/api/track', (req, res) => {
-try {
-const { visitor_id, session_id, event_type = 'page_view', url, referrer, utm_source, utm_medium, utm_campaign, utm_content, utm_term, campaign_id, adgroup_id, ad_id, custom_params = {} } = req.body;
-const vId = visitor_id || 'v_' + uuidv4().substring(0, 12);
-const sId = session_id || 's_' + uuidv4().substring(0, 12);
-if (!visitors.has(vId)) { visitors.set(vId, { visitor_id: vId, country: null, city: null, device_type: null, browser: null, os: null, first_seen: new Date().toISOString(), last_seen: new Date().toISOString() }); }
-else { const v = visitors.get(vId); v.last_seen = new Date().toISOString(); visitors.set(vId, v); }
-if (!sessions.has(sId)) { sessions.set(sId, { session_id: sId, visitor_id: vId, utm_source, utm_medium, utm_campaign, utm_content, utm_term, campaign_id, adgroup_id, ad_id, referrer, landing_page: url, custom_params, started_at: new Date().toISOString() }); }
-events.push({ id: uuidv4(), session_id: sId, visitor_id: vId, event_type, event_data: { url, ...custom_params }, timestamp: new Date().toISOString() });
-res.json({ success: true, visitor_id: vId, session_id: sId, message: 'Evento registrado' });
-} catch (error) { console.error('Track error:', error); res.status(500).json({ error: 'Erro ao registrar evento' }); }
-});
-app.get('/api/track/pixel', (req, res) => { res.set('Content-Type', 'image/gif'); res.send(Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64')); });
-app.post('/api/webhooks/purchase', (req, res) => {
-try {
-const { transaction_id, customer = {}, amount, currency = 'BRL', status = 'approved', product, session_id, click_id, email } = req.body;
-if (!transaction_id || !amount) return res.status(400).json({ error: 'transaction_id e amount obrigatorios' });
-if (orders.find(o => o.transaction_id === transaction_id)) return res.json({ success: true, message: 'Venda ja registrada' });
-let matchedSession = null;
-if (session_id && sessions.has(session_id)) matchedSession = sessions.get(session_id);
-if (!matchedSession && click_id) { for (const [id, s] of sessions) { if (s.custom_params?.click_id === click_id) { matchedSession = s; break; } } }
-const ws = matchedSession ? getWorkspace(matchedSession.visitor_id) : null;
-const order = { id: uuidv4(), transaction_id, session_id: matchedSession?.session_id || null, visitor_id: matchedSession?.visitor_id || null, workspace_id: ws?.id || null, customer_email: email || customer.email, customer_name: customer.name, amount: parseFloat(amount), currency, status, product_name: product, attribution_model: 'last_click', attributed_to: matchedSession ? { source: matchedSession.utm_source, medium: matchedSession.utm_medium, campaign: matchedSession.utm_campaign } : {}, created_at: new Date().toISOString() };
-orders.push(order);
-webhookLogs.push({ id: uuidv4(), source: 'purchase_webhook', payload: req.body, processed: true, received_at: new Date().toISOString() });
-res.json({ success: true, message: 'Venda registrada', order_id: order.id });
-} catch (error) { console.error('Webhook error:', error); res.status(500).json({ error: 'Erro ao processar webhook' }); }
-});
-app.post('/api/webhooks/lead', (req, res) => {
-const { email, phone, name, session_id } = req.body;
-if (!email && !phone) return res.status(400).json({ error: 'Email ou telefone obrigatorio' });
-const lead = { id: uuidv4(), email, phone, name, session_id, created_at: new Date().toISOString() };
-leads.push(lead);
-res.json({ success: true, message: 'Lead registrado' });
-});
-app.get('/api/webhooks/logs', authenticateToken, (req, res) => { res.json({ logs: webhookLogs.sort((a, b) => new Date(b.received_at) - new Date(a.received_at)).slice(0, 50) }); });
-app.post('/api/links/generate', authenticateToken, (req, res) => {
-const { name, destination_url, utm_source, utm_medium, utm_campaign, utm_content, utm_term, campaign_id, adgroup_id, ad_id, placement, creative_id } = req.body;
-if (!destination_url) return res.status(400).json({ error: 'URL obrigatoria' });
-const ws = getWorkspace(req.user.id);
-const shortCode = uuidv4().substring(0, 8);
-const url = new URL(destination_url);
-if (utm_source) url.searchParams.set('utm_source', utm_source);
-if (utm_medium) url.searchParams.set('utm_medium', utm_medium);
-if (utm_campaign) url.searchParams.set('utm_campaign', utm_campaign);
-if (utm_content) url.searchParams.set('utm_content', utm_content);
-if (utm_term) url.searchParams.set('utm_term', utm_term);
-const link = { id: uuidv4(), workspace_id: ws.id, user_id: req.user.id, name, destination_url, short_code: shortCode, utm_source, utm_medium, utm_campaign, utm_content, utm_term, campaign_id, adgroup_id, ad_id, placement, creative_id, clicks_count: 0, created_at: new Date().toISOString() };
-trackingLinks.set(link.id, link);
-res.json({ success: true, link, tracking_url: url.toString(), short_url: '/r/' + shortCode });
-});
-app.get('/api/links', authenticateToken, (req, res) => { const ws = getWorkspace(req.user.id); const links = Array.from(trackingLinks.values()).filter(l => l.workspace_id === ws.id).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)); res.json({ links, total: links.length }); });
-app.delete('/api/links/:id', authenticateToken, (req, res) => { trackingLinks.delete(req.params.id); res.json({ success: true, message: 'Link deletado' }); });
-app.get('/api/orders', authenticateToken, (req, res) => { const ws = getWorkspace(req.user.id); const wsOrders = orders.filter(o => o.workspace_id === ws.id).sort((a, b) => new Date(b.created_at) - new Date(a.created_at)); res.json({ orders: wsOrders, total: wsOrders.length }); });
-app.get('/api/orders/:id', authenticateToken, (req, res) => { const order = orders.find(o => o.id === req.params.id); if (!order) return res.status(404).json({ error: 'Venda nao encontrada' }); res.json({ order, journey: { events: events.filter(e => e.session_id === order.session_id), clicks: [], leads: leads.filter(l => l.session_id === order.session_id) } }); });
-app.get('/api/visitors', authenticateToken, (req, res) => { const allVisitors = Array.from(visitors.values()).sort((a, b) => new Date(b.last_seen) - new Date(a.last_seen)); res.json({ visitors: allVisitors.slice(0, 100), total: allVisitors.length }); });
-app.get('/api/visitors/:id/journey', authenticateToken, (req, res) => { const visitor = visitors.get(req.params.id) || Array.from(visitors.values()).find(v => v.id === req.params.id); if (!visitor) return res.status(404).json({ error: 'Visitante nao encontrado' }); const vId = visitor.visitor_id || req.params.id; res.json({ visitor, sessions: Array.from(sessions.values()).filter(s => s.visitor_id === vId), events: events.filter(e => e.visitor_id === vId), orders: orders.filter(o => o.visitor_id === vId), leads: leads.filter(l => l.visitor_id === vId) }); });
-app.get('/api/events', authenticateToken, (req, res) => { const sorted = [...events].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 100); const enriched = sorted.map(e => { const s = sessions.get(e.session_id); return { ...e, utm_source: s?.utm_source, utm_campaign: s?.utm_campaign }; }); res.json({ events: enriched, total: events.length }); });
-app.get('/api/campaigns', authenticateToken, (req, res) => { res.json({ campaigns: [], total: 0 }); });
-app.get('/api/integrations', authenticateToken, (req, res) => {
-const tokenData = metaTokens.get(req.user.id);
-const platforms = [
-{ platform: 'meta', name: 'Meta Ads (Facebook/Instagram)', status: 'ready', connected: !!tokenData },
-{ platform: 'tiktok', name: 'TikTok Ads', status: 'ready', connected: false },
-{ platform: 'google', name: 'Google Ads', status: 'ready', connected: false },
-{ platform: 'hotmart', name: 'Hotmart', status: 'webhook', connected: false },
-{ platform: 'kiwify', name: 'Kiwify', status: 'webhook', connected: false },
-{ platform: 'stripe', name: 'Stripe', status: 'webhook', connected: false }
-];
-res.json({ integrations: platforms });
-});
-app.get('/tracking.js', (req, res) => { res.sendFile(join(__dirname, 'public', 'tracking.js')); });
 
-// PATCH campaign - update budget or status via Meta API
-app.patch('/api/meta/campaigns/:id', authenticateToken, async (req, res) => {
+app.set('trust proxy', 1);
+
+// CORS - Allow all necessary methods including PATCH for updates
+app.use(cors({
+  origin: process.env.FRONTEND_URL || '*',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+app.use(express.json());
+app.use(cookieParser());
+
+// --- Health Check Endpoint (Required for Railway) ---
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// --- Armazenamento em Memória (MVP) ---
+const sessions = {};
+const oauthStates = {};
+
+function getSession(req) {
+  const auth = req.headers.authorization || '';
+  const token = auth.replace('Bearer ', '');
+  if (!token) return null;
+  const data = sessions[token];
+  if (!data) {
+    console.log(`⚠️ Token inválido/expirado: ${token.slice(0,8)}...`);
+    return null;
+  }
+  return { token, data };
+}
+
+function accountStatusLabel(code) {
+  const map = {
+    1: { label: 'Ativa', color: 'emerald' },
+    2: { label: 'Desativada', color: 'slate' },
+    3: { label: 'Em revisão', color: 'amber' },
+    7: { label: 'Pagamento pendente', color: 'amber' },
+    9: { label: 'Pendente verificação', color: 'amber' },
+    100: { label: 'Bloqueada', color: 'red' },
+    101: { label: 'Restrita', color: 'red' }
+  };
+  return map[code] || { label: `Status ${code}`, color: 'slate' };
+}
+
+async function graphGet(path, accessToken, params = {}) {
+  const url = new URL(`https://graph.facebook.com/${META_API_VERSION}/${path}`);
+  url.searchParams.set('access_token', accessToken);
+  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  console.log(`📡 Graph GET: ${path}`);
+  const res = await fetch(url.toString());
+  const data = await res.json();
+  if (data.error) console.error(`❌ Graph GET error [${path}]:`, data.error);
+  return data;
+}
+
+async function graphPost(path, accessToken, body) {
+  const url = `https://graph.facebook.com/${META_API_VERSION}/${path}`;
+  const fullBody = { ...body, access_token: accessToken };
+  console.log(`📤 Graph POST: ${path}`);
+  console.log(`📤 REQUEST BODY:`, JSON.stringify(body, null, 2));
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fullBody)
+  });
+  const data = await res.json();
+  if (data.error) {
+    console.error(`❌ Graph POST ERROR [${path}]:`);
+    console.error(`   message:        ${data.error.message}`);
+    console.error(`   type:           ${data.error.type || '(none)'}`);
+    console.error(`   code:           ${data.error.code || '(none)'}`);
+    console.error(`   error_subcode:  ${data.error.error_subcode || '(none)'}`);
+    console.error(`   error_user_title: ${data.error.error_user_title || '(none)'}`);
+    console.error(`   error_user_msg:   ${data.error.error_user_msg || '(none)'}`);
+    console.error(`   error_data:     ${JSON.stringify(data.error.error_data) || '(none)'}`);
+    console.error(`   fbtrace_id:     ${data.error.fbtrace_id || '(none)'}`);
+    console.error(`   FULL ERROR:`, JSON.stringify(data.error, null, 2));
+  } else {
+    console.log(`✅ Graph POST OK [${path}]: id=${data.id || '(no id)'}`);
+  }
+  return data;
+}
+
+// --- ROTAS DE AUTENTICAÇÃO META ---
+app.get('/api/auth/login', (req, res) => {
+  const state = crypto.randomBytes(16).toString('hex');
+  oauthStates[state] = Date.now();
+  const now = Date.now();
+  Object.keys(oauthStates).forEach(k => { if (now - oauthStates[k] > 600000) delete oauthStates[k]; });
+
+  const params = new URLSearchParams({
+    client_id: process.env.META_APP_ID,
+    redirect_uri: process.env.META_REDIRECT_URI,
+    state: state,
+    scope: 'ads_management,ads_read,business_management,pages_read_engagement',
+    response_type: 'code',
+  });
+
+  console.log(`🔐 Iniciando login OAuth, state=${state.slice(0,8)}...`);
+  res.cookie('oauth_state', state, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 600000 });
+  res.redirect(`https://www.facebook.com/${META_API_VERSION}/dialog/oauth?${params}`);
+});
+
+app.get('/api/auth/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+  const cookieState = req.cookies?.oauth_state;
+  console.log(`📥 Callback: code=${!!code}, state=${!!state}, cookie=${!!cookieState}, error=${error || 'none'}`);
+
+  if (error) {
+    res.clearCookie('oauth_state');
+    return res.redirect(`${process.env.FRONTEND_URL}?error=${error}`);
+  }
+
+  const stateValid = (state && oauthStates[state]) || (state && cookieState && state === cookieState);
+  if (!code || !state || !stateValid) {
+    console.error('❌ State inválido', { hasState: !!state, inMemory: !!(state && oauthStates[state]), inCookie: !!(state && cookieState && state === cookieState) });
+    res.clearCookie('oauth_state');
+    return res.redirect(`${process.env.FRONTEND_URL}?error=invalid_oauth`);
+  }
+
+  if (oauthStates[state]) delete oauthStates[state];
+  res.clearCookie('oauth_state');
+
   try {
-    const tokenData = metaTokens.get(req.user.id);
-    if (!tokenData) return res.status(401).json({ error: 'Meta nao conectado' });
+    console.log('🔄 Trocando code por token...');
+    const tokenRes = await fetch(
+      `https://graph.facebook.com/${META_API_VERSION}/oauth/access_token?` +
+      new URLSearchParams({
+        client_id: process.env.META_APP_ID,
+        client_secret: process.env.META_APP_SECRET,
+        redirect_uri: process.env.META_REDIRECT_URI,
+        code: code,
+      })
+    );
+    const tokenData = await tokenRes.json();
+    if (tokenData.error) throw new Error(tokenData.error.message);
+
+    console.log('🔄 Trocando por token de longa duração...');
+    const longLivedRes = await fetch(
+      `https://graph.facebook.com/${META_API_VERSION}/oauth/access_token?` +
+      new URLSearchParams({
+        grant_type: 'fb_exchange_token',
+        client_id: process.env.META_APP_ID,
+        client_secret: process.env.META_APP_SECRET,
+        fb_exchange_token: tokenData.access_token,
+      })
+    );
+    const longLivedData = await longLivedRes.json();
+    const metaAccessToken = longLivedData.access_token || tokenData.access_token;
+
+    console.log('🏢 Buscando Business Managers...');
+    const businessesData = await graphGet('me/businesses', metaAccessToken, {
+      fields: 'name,owned_ad_accounts{name,account_status,currency}'
+    });
+
+    const businesses = (businessesData.data || []).map(bm => ({
+      id: bm.id,
+      name: bm.name,
+      adAccounts: (bm.owned_ad_accounts?.data || []).map(acc => {
+        const st = accountStatusLabel(acc.account_status);
+        return {
+          id: acc.id, name: acc.name, currency: acc.currency,
+          status: acc.account_status, statusLabel: st.label, statusColor: st.color,
+          isActive: acc.account_status === 1, selected: false
+        };
+      })
+    }));
+
+    if (businesses.length === 0) {
+      console.log('👤 Sem BMs, buscando contas pessoais...');
+      const directData = await graphGet('me/adaccounts', metaAccessToken, { fields: 'name,account_status,currency' });
+      if (directData.data?.length > 0) {
+        businesses.push({
+          id: 'personal', name: 'Contas Pessoais',
+          adAccounts: directData.data.map(acc => {
+            const st = accountStatusLabel(acc.account_status);
+            return { id: acc.id, name: acc.name, currency: acc.currency, status: acc.account_status, statusLabel: st.label, statusColor: st.color, isActive: acc.account_status === 1, selected: false };
+          })
+        });
+      }
+    }
+
+    const globalConfig = { pixelId: null, pageId: null, advertiserId: null, instagramId: null };
+
+    const sessionToken = crypto.randomBytes(32).toString('hex');
+    sessions[sessionToken] = { accessToken: metaAccessToken, businesses, globalConfig };
+    console.log(`✅ Login OK — ${businesses.length} BM(s)`);
+    res.redirect(`${process.env.FRONTEND_URL}?auth=success&token=${sessionToken}`);
+  } catch (err) {
+    console.error('❌ OAuth error:', err);
+    res.redirect(`${process.env.FRONTEND_URL}?error=oauth_failed&msg=${encodeURIComponent(err.message)}`);
+  }
+});
+
+app.get('/api/auth/status', (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.json({ connected: false, businesses: [], globalConfig: null });
+  res.json({ connected: true, businesses: session.data.businesses, globalConfig: session.data.globalConfig });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  const session = getSession(req);
+  if (session) delete sessions[session.token];
+  res.json({ ok: true });
+});
+
+// --- ROTA: PIXELS DE UMA CONTA ---
+app.get('/api/accounts/:accountId/pixels', async (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Not authenticated' });
+  try {
+    let accId = req.params.accountId;
+    if (!accId.startsWith('act_')) accId = `act_${accId}`;
+    const data = await graphGet(`${accId}/adspixels`, session.data.accessToken, { fields: 'id,name' });
+    if (data.error) return res.status(400).json({ error: data.error.message });
+    res.json({ pixels: data.data || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- ROTA: PÁGINAS DO USUÁRIO ---
+app.get('/api/pages', async (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Not authenticated' });
+  try {
+    const data = await graphGet('me/accounts', session.data.accessToken, { fields: 'id,name,category' });
+    if (data.error) return res.status(400).json({ error: data.error.message });
+    res.json({ pages: data.data || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- ROTA: ANUNCIANTES REAIS DO BM ---
+app.get('/api/businesses/:businessId/advertisers', async (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Not authenticated' });
+  try {
+    const data = await graphGet(`${req.params.businessId}/assigned_users`, session.data.accessToken, {
+      fields: 'id,name,email,role'
+    });
+    if (data.error) {
+      console.warn('⚠️ Sem permissão para assigned_users, retornando vazio');
+      return res.json({ advertisers: [] });
+    }
+    res.json({ advertisers: data.data || [] });
+  } catch (err) {
+    res.json({ advertisers: [] });
+  }
+});
+
+// --- ROTA: PERFIS DO INSTAGRAM VINCULADOS ÀS PÁGINAS ---
+app.get('/api/pages/:pageId/instagram', async (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Not authenticated' });
+  try {
+    const data = await graphGet(`${req.params.pageId}`, session.data.accessToken, {
+      fields: 'instagram_business_account{id,username,name}'
+    });
+    if (data.error || !data.instagram_business_account) {
+      return res.json({ instagram: null });
+    }
+    res.json({ instagram: data.instagram_business_account });
+  } catch (err) {
+    res.json({ instagram: null });
+  }
+});
+
+// --- ROTA: CONFIGURAÇÕES GLOBAIS ---
+app.post('/api/global-config', (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Not authenticated' });
+  const { pixelId, pageId, advertiserId, instagramId } = req.body;
+  if (pixelId !== undefined) session.data.globalConfig.pixelId = pixelId || null;
+  if (pageId !== undefined) session.data.globalConfig.pageId = pageId || null;
+  if (advertiserId !== undefined) session.data.globalConfig.advertiserId = advertiserId || null;
+  if (instagramId !== undefined) session.data.globalConfig.instagramId = instagramId || null;
+  console.log(`💾 Config global atualizada:`, session.data.globalConfig);
+  res.json({ ok: true, globalConfig: session.data.globalConfig });
+});
+
+app.get('/api/global-config', (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Not authenticated' });
+  res.json({ globalConfig: session.data.globalConfig });
+});
+
+// --- ROTA DE INTERPRETAÇÃO IA ---
+app.post('/api/ai/interpret', async (req, res) => {
+  const { command, creatives, disableAdvantagePlus } = req.body;
+  if (!command) return res.status(400).json({ error: 'Command required' });
+
+  const creativeList = (creatives || []).map((c, i) => `${i + 1}. "${c.name || c.fileName}" (${c.type})`).join('\n');
+
+  try {
+    const { default: OpenAI } = await import('openai');
+    if (!process.env.OPENAI_API_KEY) {
+      return res.json({
+        campaigns: 1, objective: 'OUTCOME_SALES', budget_type: 'CBO', daily_budget: 25,
+        gender: 'all', age_min: 18, age_max: 65, conversion_event: 'PURCHASE',
+        website_url: '', display_link: '', url_params: '',
+        primary_text: '', headline: '', description: '', call_to_action: 'LEARN_MORE',
+        campaign_name: '', adset_name: '', ad_name: '',
+        placements: 'AUTOMATIC', bid_strategy: 'LOWEST_COST_WITHOUT_CAP',
+        start_time: 'immediate', end_time: '',
+        languages: [], dynamic_creative: false,
+        creative_assignments: {}
+      });
+    }
+
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const systemPrompt = `You are a Meta Ads campaign parser. Extract JSON from Portuguese commands.
+Return ONLY JSON with these fields:
+- campaigns (number)
+- objective (OUTCOME_AWARENESS/OUTCOME_TRAFFIC/OUTCOME_ENGAGEMENT/OUTCOME_LEADS/OUTCOME_SALES/OUTCOME_APP_PROMOTION)
+- budget_type (CBO/ABO)
+- daily_budget (number in BRL)
+- gender (male/female/all)
+- age_min (number)
+- age_max (number)
+- conversion_event (PURCHASE/ADD_TO_CART/INITIATE_CHECKOUT/LEAD/COMPLETE_REGISTRATION/VIEW_CONTENT/SEARCH/CONTACT/SUBSCRIBE)
+- website_url, display_link, url_params (strings)
+- primary_text, headline, description (strings)
+- call_to_action (LEARN_MORE/SHOP_NOW/SIGN_UP/CONTACT_US/DOWNLOAD/BOOK_NOW/GET_QUOTE/APPLY_NOW/SEND_MESSAGE/WATCH_VIDEO/CALL_NOW/SUBSCRIBE/DONATE/NO_BUTTON)
+- campaign_name, adset_name, ad_name (strings, optional custom names)
+- placements (AUTOMATIC or MANUAL)
+- bid_strategy (LOWEST_COST_WITHOUT_CAP/COST_CAP/BID_CAP)
+- dynamic_creative (boolean)
+- creative_assignments (object mapping campaign number to creative name)
+
+AVAILABLE CREATIVES:
+${creativeList || '(none)'}`;
+
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: command }],
+      response_format: { type: 'json_object' },
+      temperature: 0.1
+    });
+    const result = JSON.parse(completion.choices[0].message.content);
+    res.json(result);
+  } catch (err) {
+    console.error('❌ AI error:', err);
+    res.status(500).json({ error: 'Failed to interpret' });
+  }
+});
+
+// Normaliza objetivo para OUTCOME_* (ODAX API v21.0)
+function normalizeObjective(obj) {
+  const map = {
+    OUTCOME_AWARENESS: 'OUTCOME_AWARENESS', OUTCOME_TRAFFIC: 'OUTCOME_TRAFFIC',
+    OUTCOME_ENGAGEMENT: 'OUTCOME_ENGAGEMENT', OUTCOME_LEADS: 'OUTCOME_LEADS',
+    OUTCOME_SALES: 'OUTCOME_SALES', OUTCOME_APP_PROMOTION: 'OUTCOME_APP_PROMOTION',
+    SALES: 'OUTCOME_SALES', CONVERSIONS: 'OUTCOME_SALES', WEBSITE_CONVERSIONS: 'OUTCOME_SALES',
+    OFFSITE_CONVERSIONS: 'OUTCOME_SALES', PRODUCT_CATALOG_SALES: 'OUTCOME_SALES', STORE_VISITS: 'OUTCOME_SALES',
+    TRAFFIC: 'OUTCOME_TRAFFIC', LINK_CLICKS: 'OUTCOME_TRAFFIC',
+    ENGAGEMENT: 'OUTCOME_ENGAGEMENT', POST_ENGAGEMENT: 'OUTCOME_ENGAGEMENT', PAGE_LIKES: 'OUTCOME_ENGAGEMENT',
+    EVENT_RESPONSES: 'OUTCOME_ENGAGEMENT', OFFER_CLAIMS: 'OUTCOME_ENGAGEMENT', MESSAGES: 'OUTCOME_ENGAGEMENT',
+    LEADS: 'OUTCOME_LEADS', LEAD_GENERATION: 'OUTCOME_LEADS',
+    AWARENESS: 'OUTCOME_AWARENESS', BRAND_AWARENESS: 'OUTCOME_AWARENESS', REACH: 'OUTCOME_AWARENESS', VIDEO_VIEWS: 'OUTCOME_AWARENESS',
+    APP_PROMOTION: 'OUTCOME_APP_PROMOTION', APP_INSTALLS: 'OUTCOME_APP_PROMOTION',
+    LOCAL_AWARENESS: 'OUTCOME_AWARENESS'
+  };
+  return map[obj] || 'OUTCOME_SALES';
+}
+
+// ===== MATRIZ DE COMPATIBILIDADE ODAX (API v21.0) =====
+const OBJECTIVE_COMPAT = {
+  OUTCOME_SALES: {
+    destination_type: 'WEBSITE',
+    optimization_goal: 'OFFSITE_CONVERSIONS',
+    billing_event: 'IMPRESSIONS',
+    requires_pixel: true,
+    requires_promoted_object: true,
+    valid_conversion_events: ['PURCHASE','ADD_TO_CART','INITIATE_CHECKOUT','LEAD','COMPLETE_REGISTRATION','VIEW_CONTENT','SEARCH','CONTACT','SUBSCRIBE']
+  },
+  OUTCOME_LEADS: {
+    destination_type: 'WEBSITE',
+    optimization_goal: 'OFFSITE_CONVERSIONS',
+    billing_event: 'IMPRESSIONS',
+    requires_pixel: true,
+    requires_promoted_object: true,
+    valid_conversion_events: ['LEAD','COMPLETE_REGISTRATION','VIEW_CONTENT','CONTACT','SUBSCRIBE']
+  },
+  OUTCOME_TRAFFIC: {
+    destination_type: 'WEBSITE',
+    optimization_goal: 'LINK_CLICKS',
+    billing_event: 'IMPRESSIONS',
+    requires_pixel: false,
+    requires_promoted_object: false,
+    valid_conversion_events: []
+  },
+  OUTCOME_ENGAGEMENT: {
+    destination_type: null,
+    optimization_goal: 'POST_ENGAGEMENT',
+    billing_event: 'IMPRESSIONS',
+    requires_pixel: false,
+    requires_promoted_object: false,
+    valid_conversion_events: []
+  },
+  OUTCOME_AWARENESS: {
+    destination_type: null,
+    optimization_goal: 'REACH',
+    billing_event: 'IMPRESSIONS',
+    requires_pixel: false,
+    requires_promoted_object: false,
+    valid_conversion_events: []
+  },
+  OUTCOME_APP_PROMOTION: {
+    destination_type: 'APP',
+    optimization_goal: 'APP_INSTALLS',
+    billing_event: 'IMPRESSIONS',
+    requires_pixel: false,
+    requires_promoted_object: true,
+    valid_conversion_events: []
+  }
+};
+
+// Constrói o corpo do AdSet dinamicamente baseado no objetivo
+function buildAdSetBody(objective, config, campaignId, pixelId, conversionEvent, adsetName) {
+  const compat = OBJECTIVE_COMPAT[objective] || OBJECTIVE_COMPAT.OUTCOME_SALES;
+
+  const body = {
+    name: adsetName,
+    campaign_id: campaignId,
+    status: 'PAUSED',
+    billing_event: compat.billing_event,
+    optimization_goal: compat.optimization_goal,
+    targeting: {
+      geo_locations: { countries: config.countries || ['BR'] },
+      age_min: config.age_min || 18,
+      age_max: config.age_max || 65
+    }
+  };
+
+  if (compat.destination_type) {
+    body.destination_type = compat.destination_type;
+  }
+
+  if (compat.requires_promoted_object && compat.requires_pixel && pixelId) {
+    const promotedObj = { pixel_id: pixelId };
+    if (conversionEvent && compat.valid_conversion_events.includes(conversionEvent)) {
+      promotedObj.custom_event_type = conversionEvent;
+    } else if (compat.valid_conversion_events.length > 0) {
+      promotedObj.custom_event_type = compat.valid_conversion_events[0];
+    }
+    body.promoted_object = promotedObj;
+  } else if (compat.requires_promoted_object && !compat.requires_pixel) {
+    if (config.application_id) {
+      body.promoted_object = { application_id: config.application_id };
+    }
+  }
+
+  if (config.budget_type === 'ABO' && config.daily_budget) {
+    body.daily_budget = Math.round(config.daily_budget * 100);
+  }
+
+  body.bid_strategy = 'LOWEST_COST_WITHOUT_CAP';
+
+  if (config.adset_spend_cap) body.spend_cap = Math.round(config.adset_spend_cap * 100);
+  if (config.start_time && config.start_time !== 'immediate') body.start_time = config.start_time;
+  if (config.end_time) body.end_time = config.end_time;
+  if (config.dynamic_creative) body.dynamic_creative_spec = { enabled: true };
+
+  if (config.placements === 'MANUAL' && config.manual_placements?.length > 0) {
+    body.targeting.publisher_platforms = [...new Set(config.manual_placements.map(p => {
+      if (p.startsWith('facebook')) return 'facebook';
+      if (p.startsWith('instagram')) return 'instagram';
+      if (p.startsWith('messenger')) return 'messenger';
+      if (p.startsWith('audience')) return 'audience_network';
+      return null;
+    }).filter(Boolean))];
+    const platformMap = {
+      facebook_feed: { facebook: ['feed'] },
+      facebook_right_column: { facebook: ['right_hand_column'] },
+      facebook_story: { facebook: ['story'] },
+      instagram_feed: { instagram: ['stream'] },
+      instagram_story: { instagram: ['story'] },
+      instagram_reels: { instagram: ['reels'] },
+      messenger_inbox: { messenger: ['messenger_home'] },
+      audience_network: { audience_network: ['classic'] }
+    };
+    const pos = {};
+    config.manual_placements.forEach(p => {
+      const mapping = platformMap[p];
+      if (mapping) {
+        Object.entries(mapping).forEach(([plat, vals]) => {
+          if (!pos[plat]) pos[plat] = [];
+          pos[plat].push(...vals);
+        });
+      }
+    });
+    if (Object.keys(pos).length > 0) body.targeting.device_platforms = ['mobile', 'desktop'];
+  }
+
+  return body;
+}
+
+// --- ROTA DE CRIAÇÃO DE CAMPANHAS COMPLETAS ---
+app.post('/api/campaigns/create', async (req, res) => {
+  const { config, accountIds, globalConfig } = req.body;
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Not authenticated' });
+  const accessToken = session.data.accessToken;
+  if (!accountIds?.length) return res.status(400).json({ error: 'No accounts selected' });
+
+  const pixelId = globalConfig?.pixelId || session.data.globalConfig?.pixelId;
+  const pageId = globalConfig?.pageId || session.data.globalConfig?.pageId;
+  const advertiserId = globalConfig?.advertiserId || session.data.globalConfig?.advertiserId;
+  const instagramId = globalConfig?.instagramId || session.data.globalConfig?.instagramId;
+
+  const objective = normalizeObjective(config.objective || 'OUTCOME_SALES');
+  const compat = OBJECTIVE_COMPAT[objective] || OBJECTIVE_COMPAT.OUTCOME_SALES;
+  if (compat.requires_pixel && !pixelId) {
+    return res.status(400).json({ error: `Pixel é obrigatório para o objetivo ${objective}` });
+  }
+  if (!pageId) {
+    return res.status(400).json({ error: 'Página do Facebook é obrigatória para criar anúncios' });
+  }
+
+  const rawObjective = config.objective || 'OUTCOME_SALES';
+  config.objective = normalizeObjective(rawObjective);
+  console.log(`🎯 Objetivo: ${rawObjective} → ${config.objective}`);
+
+  const conversionEvent = config.conversion_event || 'PURCHASE';
+  console.log(`🎯 Evento conversão: ${conversionEvent}`);
+
+  const results = [];
+
+  for (const accountId of accountIds) {
+    const cleanId = accountId.replace('act_', '');
+
+    for (let i = 1; i <= (config.campaigns || 1); i++) {
+      try {
+        console.log(`🚀 [${accountId}] Campanha ${i}/${config.campaigns}...`);
+
+        const campaignName = config.campaign_name || `${config.objective} Campaign ${i} - Auto`;
+        const adsetName = config.adset_name || `AdSet ${i} - Auto`;
+        const adName = config.ad_name || `Ad ${i} - Auto`;
+
+        const campaignBody = {
+          name: campaignName,
+          objective: config.objective,
+          status: 'PAUSED',
+          special_ad_categories: []
+        };
+        if (config.budget_type === 'CBO' && config.daily_budget) {
+          campaignBody.daily_budget = Math.round(config.daily_budget * 100);
+        }
+
+        const campaignData = await graphPost(`act_${cleanId}/campaigns`, accessToken, campaignBody);
+        if (campaignData.error) {
+          results.push({ accountId, step: 'Campaign', success: false, error: campaignData.error.message });
+          continue;
+        }
+        console.log(`✅ Campanha: ${campaignData.id}`);
+
+        const adSetBody = buildAdSetBody(objective, config, campaignData.id, pixelId, conversionEvent, adsetName);
+
+        console.log(`📋 AdSet [${objective}]:`, JSON.stringify(adSetBody, null, 2));
+        const adSetData = await graphPost(`act_${cleanId}/adsets`, accessToken, adSetBody);
+        if (adSetData.error) {
+          const errDetail = adSetData.error.error_user_msg || adSetData.error.error_user_title || adSetData.error.message;
+          results.push({ accountId, step: 'AdSet', campaignId: campaignData.id, success: false, error: errDetail, fullError: adSetData.error });
+          continue;
+        }
+        console.log(`✅ AdSet: ${adSetData.id}`);
+
+        const finalUrl = config.website_url || '';
+        const urlWithParams = config.url_params ? `${finalUrl}${finalUrl.includes('?') ? '&' : '?'}${config.url_params}` : finalUrl;
+        const displayUrl = config.display_link || finalUrl;
+
+        const creativeBody = {
+          name: `Creative ${i} - Auto`,
+          object_story_spec: {
+            page_id: pageId,
+            link_data: {
+              message: config.primary_text || '',
+              name: config.headline || '',
+              description: config.description || '',
+              link: urlWithParams,
+              call_to_action: { type: config.call_to_action || 'LEARN_MORE' }
+            }
+          }
+        };
+
+        if (instagramId) {
+          creativeBody.object_story_spec.instagram_actor_id = instagramId;
+        }
+
+        const creativeData = await graphPost(`act_${cleanId}/adcreatives`, accessToken, creativeBody);
+        if (creativeData.error) {
+          results.push({ accountId, step: 'Creative', campaignId: campaignData.id, adSetId: adSetData.id, success: false, error: creativeData.error.message });
+          continue;
+        }
+        console.log(`✅ Creative: ${creativeData.id}`);
+
+        const adBody = {
+          name: adName,
+          adset_id: adSetData.id,
+          creative: { creative_id: creativeData.id },
+          status: 'PAUSED'
+        };
+
+        const adData = await graphPost(`act_${cleanId}/ads`, accessToken, adBody);
+        if (adData.error) {
+          results.push({ accountId, step: 'Ad', campaignId: campaignData.id, adSetId: adSetData.id, creativeId: creativeData.id, success: false, error: adData.error.message });
+          continue;
+        }
+        console.log(`✅ Ad: ${adData.id}`);
+
+        results.push({
+          accountId, campaignId: campaignData.id, adSetId: adSetData.id,
+          creativeId: creativeData.id, adId: adData.id,
+          campaignName, adsetName, adName,
+          websiteUrl: urlWithParams, callToAction: config.call_to_action,
+          success: true
+        });
+
+      } catch (err) {
+        console.error(`❌ Exceção campanha ${i}:`, err);
+        results.push({ accountId, step: 'Exception', success: false, error: err.message });
+      }
+    }
+  }
+
+  res.json(results);
+});
+
+// --- PATCH routes for updating campaigns/adsets ---
+app.patch('/api/meta/campaigns/:id', async (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Not authenticated' });
+  try {
     const { daily_budget, lifetime_budget, status } = req.body;
     const body = {};
     if (daily_budget !== undefined) body.daily_budget = Math.round(parseFloat(daily_budget) * 100);
     if (lifetime_budget !== undefined) body.lifetime_budget = Math.round(parseFloat(lifetime_budget) * 100);
     if (status !== undefined) body.status = status;
     if (Object.keys(body).length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
-    const response = await fetch(`https://graph.facebook.com/${META_API_VERSION}/${req.params.id}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...body, access_token: tokenData.access_token })
-    });
-    const data = await response.json();
+    
+    const data = await graphPost(req.params.id, session.data.accessToken, body);
     if (data.error) return res.status(400).json({ error: data.error.message, code: data.error.code });
     res.json({ success: true, id: data.id || req.params.id, updated: body });
   } catch (error) {
@@ -358,13 +667,35 @@ app.patch('/api/meta/campaigns/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// GET ad accounts with details
-app.get('/api/meta/adaccounts', authenticateToken, async (req, res) => {
+app.patch('/api/meta/adsets/:id', async (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Not authenticated' });
   try {
-    const tokenData = metaTokens.get(req.user.id);
-    if (!tokenData) return res.status(401).json({ error: 'Meta nao conectado' });
-    const response = await fetch(`https://graph.facebook.com/${META_API_VERSION}/me/adaccounts?fields=id,name,account_status,balance,amount_spent,currency&limit=100&access_token=${tokenData.access_token}`);
-    const data = await response.json();
+    const { daily_budget, lifetime_budget, status } = req.body;
+    const body = {};
+    if (daily_budget !== undefined) body.daily_budget = Math.round(parseFloat(daily_budget) * 100);
+    if (lifetime_budget !== undefined) body.lifetime_budget = Math.round(parseFloat(lifetime_budget) * 100);
+    if (status !== undefined) body.status = status;
+    if (Object.keys(body).length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+    
+    const data = await graphPost(req.params.id, session.data.accessToken, body);
+    if (data.error) return res.status(400).json({ error: data.error.message, code: data.error.code });
+    res.json({ success: true, id: data.id || req.params.id, updated: body });
+  } catch (error) {
+    console.error('Patch adset error:', error);
+    res.status(500).json({ error: 'Erro ao atualizar conjunto' });
+  }
+});
+
+// GET ad accounts with details
+app.get('/api/meta/adaccounts', async (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Meta nao conectado' });
+  try {
+    const data = await graphGet('me/adaccounts', session.data.accessToken, { 
+      fields: 'id,name,account_status,balance,amount_spent,currency',
+      limit: '100'
+    });
     if (data.error) return res.status(400).json({ error: data.error.message });
     res.json({ accounts: data.data || [] });
   } catch (error) {
@@ -374,12 +705,14 @@ app.get('/api/meta/adaccounts', authenticateToken, async (req, res) => {
 });
 
 // GET adsets for a campaign
-app.get('/api/meta/campaigns/:id/adsets', authenticateToken, async (req, res) => {
+app.get('/api/meta/campaigns/:id/adsets', async (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Meta nao conectado' });
   try {
-    const tokenData = metaTokens.get(req.user.id);
-    if (!tokenData) return res.status(401).json({ error: 'Meta nao conectado' });
-    const response = await fetch(`https://graph.facebook.com/${META_API_VERSION}/${req.params.id}/adsets?fields=id,name,status,daily_budget,lifetime_budget,budget_remaining,start_time,end_time,created_time,updated_time,targeting,optimization_goal,bid_strategy&limit=100&access_token=${tokenData.access_token}`);
-    const data = await response.json();
+    const data = await graphGet(`${req.params.id}/adsets`, session.data.accessToken, {
+      fields: 'id,name,status,daily_budget,lifetime_budget,budget_remaining,start_time,end_time,created_time,updated_time,targeting,optimization_goal,bid_strategy',
+      limit: '100'
+    });
     if (data.error) return res.status(400).json({ error: data.error.message });
     res.json({ adsets: data.data || [] });
   } catch (error) {
@@ -389,12 +722,14 @@ app.get('/api/meta/campaigns/:id/adsets', authenticateToken, async (req, res) =>
 });
 
 // GET ads for an adset
-app.get('/api/meta/adsets/:id/ads', authenticateToken, async (req, res) => {
+app.get('/api/meta/adsets/:id/ads', async (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Meta nao conectado' });
   try {
-    const tokenData = metaTokens.get(req.user.id);
-    if (!tokenData) return res.status(401).json({ error: 'Meta nao conectado' });
-    const response = await fetch(`https://graph.facebook.com/${META_API_VERSION}/${req.params.id}/ads?fields=id,name,status,created_time,updated_time,effective_status&limit=100&access_token=${tokenData.access_token}`);
-    const data = await response.json();
+    const data = await graphGet(`${req.params.id}/ads`, session.data.accessToken, {
+      fields: 'id,name,status,created_time,updated_time,effective_status',
+      limit: '100'
+    });
     if (data.error) return res.status(400).json({ error: data.error.message });
     res.json({ ads: data.data || [] });
   } catch (error) {
@@ -403,213 +738,11 @@ app.get('/api/meta/adsets/:id/ads', authenticateToken, async (req, res) => {
   }
 });
 
-// PATCH adset - update budget or status
-app.patch('/api/meta/adsets/:id', authenticateToken, async (req, res) => {
-  try {
-    const tokenData = metaTokens.get(req.user.id);
-    if (!tokenData) return res.status(401).json({ error: 'Meta nao conectado' });
-    const { daily_budget, lifetime_budget, status } = req.body;
-    const body = {};
-    if (daily_budget !== undefined) body.daily_budget = Math.round(parseFloat(daily_budget) * 100);
-    if (lifetime_budget !== undefined) body.lifetime_budget = Math.round(parseFloat(lifetime_budget) * 100);
-    if (status !== undefined) body.status = status;
-    if (Object.keys(body).length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
-    const response = await fetch(`https://graph.facebook.com/${META_API_VERSION}/${req.params.id}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...body, access_token: tokenData.access_token })
-    });
-    const data = await response.json();
-    if (data.error) return res.status(400).json({ error: data.error.message, code: data.error.code });
-    res.json({ success: true, id: data.id || req.params.id, updated: body });
-  } catch (error) {
-    console.error('Patch adset error:', error);
-    res.status(500).json({ error: 'Erro ao atualizar conjunto' });
-  }
+// --- INICIAR SERVIDOR ---
+app.listen(PORT, () => {
+  console.log(`🚀 Backend rodando em http://localhost:${PORT}`);
+  console.log(`📋 FRONTEND_URL: ${process.env.FRONTEND_URL || '(não definido)'}`);
+  console.log(`📋 META_APP_ID: ${process.env.META_APP_ID ? '✓' : '✗ NÃO DEFINIDO'}`);
+  console.log(`📋 META_REDIRECT_URI: ${process.env.META_REDIRECT_URI || '(não definido)'}`);
+  console.log(`📋 META_API_VERSION: ${META_API_VERSION}`);
 });
-
-// POST create campaign + adset + creative + ad via Meta API
-app.post('/api/meta/campaigns', authenticateToken, async (req, res) => {
-  try {
-    const tokenData = metaTokens.get(req.user.id);
-    if (!tokenData) return res.status(401).json({ error: 'Meta nao conectado' });
-    
-    const {
-      account_id,
-      campaign_name,
-      objective,
-      daily_budget,
-      lifetime_budget,
-      adset_name,
-      conversion_event,
-      pixel_id,
-      targeting,
-      bid_strategy,
-      start_time,
-      end_time,
-      ad_name,
-      creative_name,
-      page_id,
-      image_url,
-      video_id,
-      headline,
-      body_text,
-      call_to_action,
-      destination_url,
-      status
-    } = req.body;
-    
-    if (!account_id || !campaign_name || !objective) {
-      return res.status(400).json({ error: 'account_id, campaign_name e objective sao obrigatorios' });
-    }
-    
-    const accessToken = tokenData.access_token;
-    const results = {};
-    
-    // Step 1: Create Campaign
-    const campaignBody = {
-      name: campaign_name,
-      objective: objective || 'OUTCOME_SALES',
-      status: status || 'PAUSED',
-      special_ad_categories: [],
-      buying_type: 'AUCTION'
-    };
-    
-    if (daily_budget) campaignBody.daily_budget = Math.round(parseFloat(daily_budget) * 100);
-    if (lifetime_budget) campaignBody.lifetime_budget = Math.round(parseFloat(lifetime_budget) * 100);
-    
-    console.log('[Campaign Create] Body:', JSON.stringify(campaignBody));
-    
-    const campaignResp = await fetch(`https://graph.facebook.com/${META_API_VERSION}/act_${account_id.replace('act_', '')}/campaigns`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...campaignBody, access_token: accessToken })
-    });
-    const campaignData = await campaignResp.json();
-    
-    if (campaignData.error) {
-      console.error('[Campaign Create] Error:', campaignData.error);
-      return res.status(400).json({ error: campaignData.error.message, code: campaignData.error.code, step: 'campaign' });
-    }
-    results.campaign = campaignData;
-    console.log('[Campaign Create] Success:', campaignData);
-    
-    // Step 2: Create AdSet (only if adset_name provided)
-    if (adset_name && campaignData.id) {
-      const adSetBody = {
-        name: adset_name,
-        campaign_id: campaignData.id,
-        status: 'PAUSED',
-        optimization_goal: 'OFFSITE_CONVERSIONS',
-        billing_event: 'IMPRESSIONS',
-        destination_type: 'WEBSITE',
-        promoted_object: {
-          pixel_id: pixel_id,
-          custom_event_type: conversion_event || 'PURCHASE'
-        },
-        targeting: targeting || {
-          age_min: 18,
-          age_max: 65,
-          geo_locations: { countries: ['BR'] }
-        }
-      };
-      
-      if (daily_budget) adSetBody.daily_budget = Math.round(parseFloat(daily_budget) * 100);
-      if (lifetime_budget) adSetBody.lifetime_budget = Math.round(parseFloat(lifetime_budget) * 100);
-      if (bid_strategy) adSetBody.bid_strategy = bid_strategy;
-      if (start_time) adSetBody.start_time = start_time;
-      if (end_time) adSetBody.end_time = end_time;
-      
-      console.log('[AdSet Create] Body:', JSON.stringify(adSetBody));
-      
-      const adSetResp = await fetch(`https://graph.facebook.com/${META_API_VERSION}/act_${account_id.replace('act_', '')}/adsets`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...adSetBody, access_token: accessToken })
-      });
-      const adSetData = await adSetResp.json();
-      
-      if (adSetData.error) {
-        console.error('[AdSet Create] Error:', adSetData.error);
-        results.adset_error = adSetData.error;
-      } else {
-        results.adset = adSetData;
-        console.log('[AdSet Create] Success:', adSetData);
-        
-        // Step 3: Create Ad Creative (only if creative info provided)
-        if (creative_name && adSetData.id) {
-          const creativeBody = {
-            name: creative_name,
-            object_story_spec: {
-              page_id: page_id,
-              link_data: {
-                message: body_text || '',
-                name: headline || '',
-                link: destination_url || '',
-                call_to_action: { type: call_to_action || 'LEARN_MORE' }
-              }
-            }
-          };
-          
-          if (image_url) {
-            creativeBody.object_story_spec.link_data.picture = image_url;
-          }
-          
-          console.log('[Creative Create] Body:', JSON.stringify(creativeBody));
-          
-          const creativeResp = await fetch(`https://graph.facebook.com/${META_API_VERSION}/act_${account_id.replace('act_', '')}/adcreatives`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ...creativeBody, access_token: accessToken })
-          });
-          const creativeData = await creativeResp.json();
-          
-          if (creativeData.error) {
-            console.error('[Creative Create] Error:', creativeData.error);
-            results.creative_error = creativeData.error;
-          } else {
-            results.creative = creativeData;
-            console.log('[Creative Create] Success:', creativeData);
-            
-            // Step 4: Create Ad
-            if (ad_name && creativeData.id) {
-              const adBody = {
-                name: ad_name,
-                adset_id: adSetData.id,
-                creative: { creative_id: creativeData.id },
-                status: 'PAUSED'
-              };
-              
-              console.log('[Ad Create] Body:', JSON.stringify(adBody));
-              
-              const adResp = await fetch(`https://graph.facebook.com/${META_API_VERSION}/act_${account_id.replace('act_', '')}/ads`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ...adBody, access_token: accessToken })
-              });
-              const adData = await adResp.json();
-              
-              if (adData.error) {
-                console.error('[Ad Create] Error:', adData.error);
-                results.ad_error = adData.error;
-              } else {
-                results.ad = adData;
-                console.log('[Ad Create] Success:', adData);
-              }
-            }
-          }
-        }
-      }
-    }
-    
-    res.json({ success: true, results });
-  } catch (error) {
-    console.error('Create campaign error:', error);
-    res.status(500).json({ error: 'Erro ao criar campanha: ' + error.message });
-  }
-});
-
-app.get('/api/health', (req, res) => { res.json({ status: 'ok', timestamp: new Date().toISOString(), version: '1.0.0', storage: 'memory', users_count: users.size, orders_count: orders.length, meta_connected: metaTokens.size }); });
-app.use((req, res) => res.status(404).json({ error: 'Endpoint nao encontrado' }));
-app.use((err, req, res, next) => { console.error('Error:', err); res.status(err.status || 500).json({ error: err.message || 'Erro interno' }); });
-app.listen(PORT, () => { console.log('UTM Tracker Backend running on port ' + PORT); console.log('Storage: in-memory'); console.log('Meta App ID: ' + (META_APP_ID ? 'configured' : 'NOT SET')); console.log('Frontend: ' + (process.env.FRONTEND_URL || 'not set')); });
