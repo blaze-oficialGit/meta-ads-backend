@@ -1,3 +1,4 @@
+// Force redeploy: 2026-09-27 00:10:50 - removed bid_strategy completely
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
