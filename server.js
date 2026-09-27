@@ -452,8 +452,7 @@ function buildAdSetBody(objective, config, campaignId, pixelId, conversionEvent,
       facebook_positions: ['feed', 'marketplace', 'story', 'facebook_reels', 'profile_feed'],
       instagram_positions: ['stream', 'story', 'reels', 'explore_home', 'profile_feed'],
       messenger_positions: ['messenger_home'],
-      audience_network_positions: ['classic'],
-      targeting_automation: { advantage_audience: 1 }
+      audience_network_positions: ['classic']
     },
     promoted_object: {
       pixel_id: pixelId,
