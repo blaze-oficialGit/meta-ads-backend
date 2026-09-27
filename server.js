@@ -41,6 +41,12 @@ allowedHeaders: ['Content-Type', 'Authorization']
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
+
+// --- HEALTH CHECK (Railway needs this) ---
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: { error: 'Muitas requisicoes' }, standardHeaders: true, legacyHeaders: false });
 app.use('/api/', limiter);
 function authenticateToken(req, res, next) {
