@@ -433,12 +433,14 @@ const OBJECTIVE_COMPAT = {
 function buildAdSetBody(objective, config, campaignId, pixelId, conversionEvent, adsetName) {
   const compat = OBJECTIVE_COMPAT[objective] || OBJECTIVE_COMPAT.OUTCOME_SALES;
 
-  // Para OUTCOME_SALES com Advantage+, a Meta preenche optimization_goal/billing_event/destination_type automaticamente
-  // Enviar esses campos explicitamente causa conflito "Valor do lance obrigatório"
+  // Campos obrigatórios para TODOS os objetivos (confirmado pelos prints do Gerenciador de Anúncios)
+  // OUTCOME_SALES exige: destination_type=WEBSITE, optimization_goal=OFFSITE_CONVERSIONS, billing_event=IMPRESSIONS
   const body = {
     name: adsetName,
     campaign_id: campaignId,
     status: 'PAUSED',
+    billing_event: compat.billing_event,
+    optimization_goal: compat.optimization_goal,
     targeting: {
       geo_locations: { countries: config.countries || ['BR'] },
       age_min: config.age_min || 18,
@@ -446,11 +448,9 @@ function buildAdSetBody(objective, config, campaignId, pixelId, conversionEvent,
     }
   };
 
-  // Só enviar billing_event/destination_type/optimization_goal para objetivos NÃO-SALES
-  if (objective !== 'OUTCOME_SALES') {
-    body.billing_event = compat.billing_event;
-    if (compat.destination_type) body.destination_type = compat.destination_type;
-    body.optimization_goal = compat.optimization_goal;
+  // destination_type: obrigatório para Sales/Leads/Traffic/App (confirmado nos prints: "Local da conversão: Site")
+  if (compat.destination_type) {
+    body.destination_type = compat.destination_type;
   }
 
   // promoted_object: só se o objetivo exigir
