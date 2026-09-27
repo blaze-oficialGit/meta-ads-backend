@@ -715,7 +715,7 @@ app.get('/api/adsets/:adsetId/clone-structure', async (req, res) => {
       }
     });
     
-    console.log(📋 Template extraído do AdSet :, JSON.stringify(template, null, 2));
+    console.log('📋 Template extraído do AdSet ' + adsetId + ':', JSON.stringify(template, null, 2));
     res.json({ success: true, template, originalAdSet: data });
   } catch (err) {
     console.error('❌ Error cloning adset structure:', err);
@@ -739,7 +739,7 @@ app.post('/api/adsets/create-from-template', async (req, res) => {
     // Merge template com overrides (nome personalizado, etc.)
     const adSetBody = { ...template, ...overrides };
     
-    console.log(📤 Criando AdSet from template em act_:, JSON.stringify(adSetBody, null, 2));
+    console.log('📤 Criando AdSet from template em act_' + cleanId + ':', JSON.stringify(adSetBody, null, 2));
     const result = await graphPost(ct_/adsets, accessToken, adSetBody);
     
     if (result.error) {
@@ -750,7 +750,7 @@ app.post('/api/adsets/create-from-template', async (req, res) => {
       });
     }
     
-    console.log(✅ AdSet criado from template: );
+    console.log('✅ AdSet criado from template: ' + result.id);
     res.json({ success: true, adSetId: result.id, adSetBody });
   } catch (err) {
     console.error('❌ Error creating adset from template:', err);
