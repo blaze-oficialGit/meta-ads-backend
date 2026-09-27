@@ -1,4 +1,4 @@
-// Blaze Ads Manager Backend v2.3 - Redeployed 2026-09-28 (fix: connection error - force Railway redeploy)
+// Blaze Ads Manager Backend v2.4 - Redeployed 2026-09-28 (fix: Railway train not arrived - force fresh deploy)
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
