@@ -740,7 +740,7 @@ app.post('/api/adsets/create-from-template', async (req, res) => {
     const adSetBody = { ...template, ...overrides };
     
     console.log('📤 Criando AdSet from template em act_' + cleanId + ':', JSON.stringify(adSetBody, null, 2));
-    const result = await graphPost(ct_/adsets, accessToken, adSetBody);
+    const result = await graphPost('act_' + cleanId + '/adsets', accessToken, adSetBody);
     
     if (result.error) {
       return res.status(400).json({ 
