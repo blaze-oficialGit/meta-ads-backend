@@ -1,4 +1,4 @@
-// Blaze Ads Manager Backend v2.1 - Deployed 2026-09-27
+// Blaze Ads Manager Backend v2.2 - Redeployed 2026-09-28 (fix: Railway cold start)
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
