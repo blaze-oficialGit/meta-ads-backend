@@ -433,11 +433,12 @@ const OBJECTIVE_COMPAT = {
 function buildAdSetBody(objective, config, campaignId, pixelId, conversionEvent, adsetName) {
   const compat = OBJECTIVE_COMPAT[objective] || OBJECTIVE_COMPAT.OUTCOME_SALES;
 
+  // Para OUTCOME_SALES com Advantage+, a Meta preenche optimization_goal/billing_event/destination_type automaticamente
+  // Enviar esses campos explicitamente causa conflito "Valor do lance obrigatório"
   const body = {
     name: adsetName,
     campaign_id: campaignId,
     status: 'PAUSED',
-    billing_event: compat.billing_event,
     targeting: {
       geo_locations: { countries: config.countries || ['BR'] },
       age_min: config.age_min || 18,
@@ -445,13 +446,12 @@ function buildAdSetBody(objective, config, campaignId, pixelId, conversionEvent,
     }
   };
 
-  // destination_type: só se compatível com o objetivo
-  if (compat.destination_type) {
-    body.destination_type = compat.destination_type;
+  // Só enviar billing_event/destination_type/optimization_goal para objetivos NÃO-SALES
+  if (objective !== 'OUTCOME_SALES') {
+    body.billing_event = compat.billing_event;
+    if (compat.destination_type) body.destination_type = compat.destination_type;
+    body.optimization_goal = compat.optimization_goal;
   }
-
-  // optimization_goal: usa o do objetivo ou override se válido
-  body.optimization_goal = compat.optimization_goal;
 
   // promoted_object: só se o objetivo exigir
   if (compat.requires_promoted_object && compat.requires_pixel && pixelId) {
