@@ -4,5 +4,9 @@ nixPkgs = ["nodejs_20"]
 [phases.install]
 cmds = ["npm install"]
 
+[variables]
+PORT = "3000"
+NODE_ENV = "production"
+
 [start]
 cmd = "node server.js"
