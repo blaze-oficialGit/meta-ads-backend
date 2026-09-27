@@ -659,15 +659,13 @@ app.get('/api/adsets/:adsetId/clone-structure', async (req, res) => {
       status: 'PAUSED',
       optimization_goal: data.optimization_goal,
       billing_event: data.billing_event,
-      bid_strategy: data.bid_strategy,
-      destination_type: data.destination_type,
       promoted_object: data.promoted_object,
-      targeting: data.targeting,
-      daily_budget: data.daily_budget,
-      lifetime_budget: data.lifetime_budget,
-      start_time: data.start_time,
-      end_time: data.end_time
+      targeting: data.targeting
     };
+    if (data.daily_budget) template.daily_budget = data.daily_budget;
+    if (data.lifetime_budget) template.lifetime_budget = data.lifetime_budget;
+    if (data.start_time) template.start_time = data.start_time;
+    if (data.end_time) template.end_time = data.end_time;
     
     // Remove campos undefined/null
     Object.keys(template).forEach(key => {
