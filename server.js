@@ -717,6 +717,21 @@ app.post('/api/adsets/create-from-template', async (req, res) => {
   }
 });
 
+// --- ROTA DE TESTE: Simula criação sem enviar para Meta ---
+app.post('/api/test-adset-payload', async (req, res) => {
+  const { objective, config, pixelId, conversionEvent } = req.body;
+  try {
+    const fakeCampaignId = '120200000000000000';
+    const adsetName = config.adset_name || 'Test AdSet';
+    const adSetBody = buildAdSetBody(objective || 'OUTCOME_SALES', config || {}, fakeCampaignId, pixelId || '554517393804567', conversionEvent || 'PURCHASE', adsetName);
+    console.log('TEST PAYLOAD:', JSON.stringify(adSetBody, null, 2));
+    res.json({ success: true, payload: adSetBody, note: 'This is what would be sent to Meta API' });
+  } catch (err) {
+    console.error('TEST ERROR:', err);
+    res.status(500).json({ error: err.message, stack: err.stack });
+  }
+});
+
 // --- INICIAR SERVIDOR ---
 app.listen(PORT, () => {
   console.log(`🚀 Backend rodando em http://localhost:${PORT}`);
