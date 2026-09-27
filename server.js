@@ -673,6 +673,91 @@ app.post('/api/campaigns/create', async (req, res) => {
   res.json(results);
 });
 
+
+// --- ROTA: CLONAR ESTRUTURA DE ADSET EXISTENTE (TEMPLATE) ---
+// Lê um Ad Set que já funciona e extrai a estrutura exata para replicar
+app.get('/api/adsets/:adsetId/clone-structure', async (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Not authenticated' });
+  const accessToken = session.data.accessToken;
+  const adsetId = req.params.adsetId;
+  
+  try {
+    // Lê TODOS os campos do Ad Set existente
+    const fields = 'id,name,campaign_id,status,optimization_goal,billing_event,bid_strategy,bid_amount,daily_budget,lifetime_budget,start_time,end_time,destination_type,promoted_object,targeting,created_time,updated_time';
+    const data = await graphGet(adsetId, accessToken, { fields });
+    
+    if (data.error) {
+      return res.status(400).json({ error: data.error.message, fullError: data.error });
+    }
+    
+    // Extrai apenas os campos necessários para criar um novo Ad Set
+    const template = {
+      name: data.name + ' (Clone)',
+      campaign_id: data.campaign_id,
+      status: 'PAUSED',
+      optimization_goal: data.optimization_goal,
+      billing_event: data.billing_event,
+      bid_strategy: data.bid_strategy,
+      destination_type: data.destination_type,
+      promoted_object: data.promoted_object,
+      targeting: data.targeting,
+      daily_budget: data.daily_budget,
+      lifetime_budget: data.lifetime_budget,
+      start_time: data.start_time,
+      end_time: data.end_time
+    };
+    
+    // Remove campos undefined/null
+    Object.keys(template).forEach(key => {
+      if (template[key] === undefined || template[key] === null) {
+        delete template[key];
+      }
+    });
+    
+    console.log(📋 Template extraído do AdSet :, JSON.stringify(template, null, 2));
+    res.json({ success: true, template, originalAdSet: data });
+  } catch (err) {
+    console.error('❌ Error cloning adset structure:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- ROTA: CRIAR ADSET USANDO TEMPLATE ---
+app.post('/api/adsets/create-from-template', async (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: 'Not authenticated' });
+  const accessToken = session.data.accessToken;
+  const { template, accountId, overrides } = req.body;
+  
+  if (!template || !accountId) {
+    return res.status(400).json({ error: 'Template and accountId are required' });
+  }
+  
+  try {
+    const cleanId = accountId.replace('act_', '');
+    // Merge template com overrides (nome personalizado, etc.)
+    const adSetBody = { ...template, ...overrides };
+    
+    console.log(📤 Criando AdSet from template em act_:, JSON.stringify(adSetBody, null, 2));
+    const result = await graphPost(ct_/adsets, accessToken, adSetBody);
+    
+    if (result.error) {
+      return res.status(400).json({ 
+        error: result.error.error_user_msg || result.error.message, 
+        fullError: result.error,
+        sentPayload: adSetBody 
+      });
+    }
+    
+    console.log(✅ AdSet criado from template: );
+    res.json({ success: true, adSetId: result.id, adSetBody });
+  } catch (err) {
+    console.error('❌ Error creating adset from template:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --- INICIAR SERVIDOR ---
 app.listen(PORT, () => {
   console.log(`🚀 Backend rodando em http://localhost:${PORT}`);
